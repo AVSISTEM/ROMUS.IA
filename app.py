@@ -17,22 +17,45 @@ ABSTAIN = "A base local não contém informação suficiente para responder com 
 
 RAG_PROMPT = """Você é o ROMUS.IA, assistente técnico de segurança contra incêndio.
 
-Use SOMENTE o conteúdo das passagens fornecidas para responder à pergunta.
+Sua única fonte de verdade nesta resposta são as passagens da BASE LOCAL fornecidas abaixo.
 
-REGRAS:
-- Se a resposta estiver nas passagens, responda diretamente.
-- Preserve exatamente números, unidades, datas, artigos, itens e referências normativas.
-- Não use conhecimento externo.
-- Não invente informação que não esteja nas passagens.
-- Não misture regras de documentos diferentes para criar uma regra nova.
-- Se a informação necessária não estiver nas passagens, responda exatamente:
-A base local não contém informação suficiente para responder com segurança.
-- Para uma pergunta objetiva, seja objetivo.
+REGRAS OBRIGATÓRIAS:
+1. Responda SOMENTE com informação que esteja nas passagens.
+2. Não complete lacunas com conhecimento próprio.
+3. Não invente números, unidades, artigos, itens, tabelas ou conclusões.
+4. Preserve exatamente números, unidades, datas e referências normativas encontradas.
+5. Se a pergunta pedir um cálculo, só faça o cálculo quando todos os valores necessários estiverem nas passagens.
+6. Não misture documentos diferentes para criar uma regra que não esteja expressamente sustentada.
+7. Se as passagens não permitirem responder com segurança, responda exatamente com a frase de insuficiência.
+8. Para perguntas objetivas, responda primeiro com a resposta objetiva e depois, se necessário, indique o item/página que a sustenta.
+9. Nunca diga que uma informação está na base sem que ela esteja efetivamente nas passagens.
 
 PERGUNTA:
 {question}
 
-PASSAGENS DA BASE LOCAL:
+BASE LOCAL:
+{context}
+
+RESPOSTA:
+"""
+
+EXTRACTIVE_PROMPT = """Atue como um extrator rigoroso de informação normativa.
+
+Use exclusivamente o texto da BASE LOCAL abaixo. A tarefa é encontrar a resposta para a pergunta, não explicar conhecimento geral.
+
+REGRAS:
+- Copie literalmente os trechos necessários da base quando eles contiverem a resposta.
+- Preserve números, unidades, sinais, artigos, itens e referências.
+- Se houver uma fórmula ou regra de cálculo na base, reproduza-a e aplique-a somente se todos os valores necessários estiverem presentes.
+- Não invente informação e não use conhecimento externo.
+- Se a resposta não estiver comprovada no texto fornecido, responda exatamente:
+A base local não contém informação suficiente para responder com segurança.
+- Seja curto e objetivo.
+
+PERGUNTA:
+{question}
+
+BASE LOCAL:
 {context}
 
 RESPOSTA:
@@ -89,7 +112,7 @@ def catalogo(sig):
     for p in sorted(KNOWLEDGE_DIR.rglob("*")):
         if p.is_file() and p.suffix.lower() in {".pdf", ".txt", ".md"}:
             s = p.stat()
-            out.append({"arquivo":str(p.relative_to(KNOWLEDGE_DIR)),"nome":p.name,"norm":norm(p.name),"tamanho":s.st_size,"mtime":s.st_mtime_ns})
+            out.append({"arquivo": str(p.relative_to(KNOWLEDGE_DIR)), "nome": p.name, "norm": norm(p.name), "tamanho": s.st_size, "mtime": s.st_mtime_ns})
     return out
 
 
@@ -101,7 +124,10 @@ def ler(arquivo, tamanho, mtime):
         if p.suffix.lower() == ".pdf":
             paginas = []
             for numero, page in enumerate(PdfReader(str(p)).pages, start=1):
-                texto = re.sub(r"[ \t]+", " ", page.extract_text() or "").strip()
+                bruto = page.extract_text() or ""
+                texto = bruto.replace("\u00a0", " ")
+                texto = re.sub(r"[ \t]+", " ", texto)
+                texto = re.sub(r"\n{3,}", "\n\n", texto).strip()
                 if texto:
                     paginas.append((numero, texto))
         else:
@@ -112,7 +138,7 @@ def ler(arquivo, tamanho, mtime):
     if not paginas:
         return None
     total = "\n\n".join(t for _, t in paginas)
-    return {"arquivo":arquivo,"nome":p.name,"paginas":paginas,"hash":hashlib.sha256(total.encode()).hexdigest()}
+    return {"arquivo": arquivo, "nome": p.name, "paginas": paginas, "hash": hashlib.sha256(total.encode()).hexdigest()}
 
 
 def selecionar(question, cat):
@@ -121,7 +147,7 @@ def selecionar(question, cat):
         if docs:
             return docs[:1]
     qn = set(normalizar(question))
-    if {"unidade","passagem"} <= qn or bool({"saida","saidas","emergencia"} & qn):
+    if {"unidade", "passagem"} <= qn or bool({"saida", "saidas", "emergencia"} & qn):
         docs = [d for d in cat if eh_it(d["nome"], 11, 2025)]
         if docs:
             return docs[:1]
@@ -138,7 +164,18 @@ def pagina_score(question, page_text, filename):
     b = set(normalizar(page_text))
     bn = norm(page_text)
     score = 5 * len(q & b)
-    for phrase, weight in [("unidade de passagem",60),("unidades de passagem",60),("largura das saidas",60),("largura minima",50),("larguras minimas",50),("dimensionamento das saidas",50),("capacidade da unidade de passagem",45)]:
+    for phrase, weight in [
+        ("unidade de passagem", 60),
+        ("unidades de passagem", 60),
+        ("largura das saidas", 60),
+        ("largura minima", 50),
+        ("larguras minimas", 50),
+        ("dimensionamento das saidas", 50),
+        ("capacidade da unidade de passagem", 45),
+        ("calculo da largura", 55),
+        ("calculo das larguras", 55),
+        ("largura da saida", 55),
+    ]:
         if phrase in bn:
             score += weight
     for numero, ano in refs(question):
@@ -156,19 +193,34 @@ def recuperar(question, docs):
         for pagina, texto in d["paginas"]:
             score = pagina_score(question, texto, d["nome"])
             if score > 0:
-                candidatos.append({"arquivo":d["arquivo"],"pagina":pagina,"texto":texto,"score":score})
-    candidatos.sort(key=lambda x:x["score"], reverse=True)
-    finais=[]
-    vistos=set()
-    for item in candidatos:
-        chave=(item["arquivo"],item["pagina"])
-        if chave in vistos:
+                candidatos.append({"arquivo": d["arquivo"], "pagina": pagina, "texto": texto, "score": score})
+    candidatos.sort(key=lambda x: x["score"], reverse=True)
+
+    # Não basta pegar páginas isoladas: normas frequentemente quebram uma tabela,
+    # fórmula ou regra entre duas páginas consecutivas. Mantemos as páginas
+    # vizinhas dos melhores resultados para preservar o contexto normativo.
+    por_doc = {d["arquivo"]: d for d in docs}
+    escolhidos = []
+    vistos = set()
+    for item in candidatos[:6]:
+        d = por_doc.get(item["arquivo"])
+        if not d:
             continue
-        vistos.add(chave)
-        finais.append(item)
-        if len(finais)>=4:
+        numeros = [item["pagina"] - 1, item["pagina"], item["pagina"] + 1]
+        mapa = {p: t for p, t in d["paginas"]}
+        for pagina in numeros:
+            if pagina not in mapa:
+                continue
+            chave = (item["arquivo"], pagina)
+            if chave in vistos:
+                continue
+            vistos.add(chave)
+            escolhidos.append({"arquivo": item["arquivo"], "pagina": pagina, "texto": mapa[pagina], "score": item["score"] if pagina == item["pagina"] else max(1, item["score"] - 5)})
+            if len(escolhidos) >= 10:
+                break
+        if len(escolhidos) >= 10:
             break
-    return finais
+    return escolhidos
 
 
 def cliente():
@@ -176,21 +228,49 @@ def cliente():
     return genai.Client(api_key=key) if key else None
 
 
+def contexto(passages):
+    return "\n\n".join(
+        f"[DOCUMENTO {i}] {p['arquivo']} | PÁGINA {p['pagina']}\n{p['texto']}"
+        for i, p in enumerate(passages, 1)
+    )
+
+
+def gerar(c, prompt):
+    return c.models.generate_content(
+        model=MODEL,
+        contents=prompt,
+        config=types.GenerateContentConfig(temperature=0, max_output_tokens=900),
+    )
+
+
 def gerar_resposta(c, question, passages):
-    context = "\n\n".join(f"[DOCUMENTO {i}] {p['arquivo']} | PÁGINA {p['pagina']}\n{p['texto']}" for i,p in enumerate(passages,1))
-    prompt = RAG_PROMPT.format(question=question, context=context)
-    return c.models.generate_content(model=MODEL, contents=prompt, config=types.GenerateContentConfig(temperature=0, max_output_tokens=700))
+    ctx = contexto(passages)
+    primeira = gerar(c, RAG_PROMPT.format(question=question, context=ctx))
+    texto = resposta_valida(primeira.text)
+    if texto:
+        return texto
+
+    # Segunda passagem deliberadamente extrativa. Não é troca de "personalidade":
+    # é uma validação contra o próprio texto recuperado quando o modelo se abstém.
+    segunda = gerar(c, EXTRACTIVE_PROMPT.format(question=question, context=ctx))
+    return resposta_valida(segunda.text)
 
 
 def resposta_valida(texto):
-    texto=(texto or "").strip()
-    if not texto or ABSTAIN in texto:
+    texto = (texto or "").strip()
+    if not texto:
+        return None
+    if ABSTAIN in texto:
         return None
     return texto
 
 
 def pesquisar_web(c, question):
-    return c.models.generate_content(model=MODEL, contents=WEB_PROMPT+"\n\nPERGUNTA:\n"+question, config=types.GenerateContentConfig(max_output_tokens=800, tools=[types.Tool(google_search=types.GoogleSearch())]))
+    return c.models.generate_content(
+        model=MODEL,
+        contents=WEB_PROMPT + "\n\nPERGUNTA:\n" + question,
+        config=types.GenerateContentConfig(max_output_tokens=800, tools=[types.Tool(google_search=types.GoogleSearch())]),
+    )
 
 
 def fontes(passages):
@@ -203,38 +283,42 @@ def fontes(passages):
 
 st.title("ROMUS.IA")
 st.caption("Inteligência artificial técnica e objetiva.")
-question=st.text_area("Digite sua pergunta:",height=110)
-web_ok=st.checkbox("Pesquisar na web se a base não responder",value=True)
-c1,c2=st.columns(2)
+question = st.text_area("Digite sua pergunta:", height=110)
+web_ok = st.checkbox("Pesquisar na web se a base não responder", value=True)
+c1, c2 = st.columns(2)
 with c1:
-    perguntar=st.button("Perguntar",type="primary")
+    perguntar = st.button("Perguntar", type="primary")
 with c2:
-    recarregar=st.button("Recarregar base")
+    recarregar = st.button("Recarregar base")
 if recarregar:
     st.cache_data.clear()
     st.rerun()
 
 if perguntar and question.strip():
-    question=question.strip()
+    question = question.strip()
     with st.spinner("Localizando o documento correto..."):
-        cat=catalogo(assinatura_base())
-        docs=[]
-        hashes=set()
-        for d in selecionar(question,cat):
-            x=ler(d["arquivo"],d["tamanho"],d["mtime"])
+        cat = catalogo(assinatura_base())
+        docs = []
+        hashes = set()
+        for d in selecionar(question, cat):
+            x = ler(d["arquivo"], d["tamanho"], d["mtime"])
             if x and x["hash"] not in hashes:
-                docs.append(x); hashes.add(x["hash"])
-    with st.spinner("Localizando as páginas relevantes..."):
-        passages=recuperar(question,docs)
-    st.caption("Fonte: base local do ROMUS.IA")
+                docs.append(x)
+                hashes.add(x["hash"])
 
-    c=cliente(); resposta=None
+    with st.spinner("Localizando as páginas relevantes..."):
+        passages = recuperar(question, docs)
+
+    st.caption("Fonte: base local do ROMUS.IA")
+    c = cliente()
+    resposta = None
     if passages and c:
         with st.spinner("Consultando a evidência local..."):
             try:
-                resposta=resposta_valida(gerar_resposta(c,question,passages).text)
+                resposta = gerar_resposta(c, question, passages)
             except Exception:
-                resposta=None
+                resposta = None
+
     if resposta:
         st.markdown("### ROMUS.IA")
         st.write(resposta)
@@ -243,9 +327,9 @@ if perguntar and question.strip():
 
     if web_ok and c:
         try:
-            web_text=(pesquisar_web(c,question).text or "").strip()
+            web_text = (pesquisar_web(c, question).text or "").strip()
         except Exception:
-            web_text=""
+            web_text = ""
         if web_text:
             st.caption("Fonte: pesquisa na internet — base local insuficiente")
             st.markdown("### ROMUS.IA")
