@@ -37,6 +37,8 @@ REGRAS GERAIS
 8. Se a informação não puder ser confirmada, diga isso claramente.
 """
 
+LIMITE_INSUFICIENTE = "__BASE_INSUFICIENTE__"
+
 
 def normalizar(texto: str) -> list[str]:
     texto = texto.lower()
@@ -67,7 +69,10 @@ def carregar_documentos() -> list[dict]:
             try:
                 texto = ler_arquivo(caminho).strip()
                 if texto:
-                    documentos.append({"arquivo": caminho.relative_to(KNOWLEDGE_DIR).as_posix(), "texto": texto})
+                    documentos.append({
+                        "arquivo": caminho.relative_to(KNOWLEDGE_DIR).as_posix(),
+                        "texto": texto,
+                    })
             except Exception:
                 continue
 
@@ -97,13 +102,11 @@ def construir_indice() -> list[dict]:
     indice = []
     for documento in carregar_documentos():
         for bloco in dividir_em_blocos(documento["texto"]):
-            indice.append(
-                {
-                    "arquivo": documento["arquivo"],
-                    "texto": bloco,
-                    "termos": set(normalizar(bloco)),
-                }
-            )
+            indice.append({
+                "arquivo": documento["arquivo"],
+                "texto": bloco,
+                "termos": set(normalizar(bloco)),
+            })
     return indice
 
 
@@ -123,6 +126,89 @@ def buscar_base(pergunta: str) -> list[dict]:
     return resultados[:MAX_CHUNKS]
 
 
+def extrair_numero_item(pergunta: str) -> str | None:
+    padrao = re.search(r"\b(?:item\s+)?(\d+(?:\.\d+){2,})\b", pergunta.lower())
+    return padrao.group(1) if padrao else None
+
+
+def eh_pedido_transcricao_literal(pergunta: str) -> bool:
+    termos = normalizar(pergunta)
+    return any(
+        termo in termos
+        for termo in {"transcreva", "transcrever", "literalmente", "literal", "exatamente", "exato"}
+    )
+
+
+def extrair_item_literal(texto: str, numero_item: str) -> str | None:
+    """Extrai literalmente um item numerado do texto extraído do PDF.
+    Não usa o Gemini para reescrever o conteúdo.
+    """
+    numero = re.escape(numero_item)
+
+    # Primeiro tenta localizar o item no início de uma linha.
+    padrao = re.compile(
+        rf"(?ms)^\s*{numero}\b.*?(?=^\s*\d+(?:\.\d+){{2,}}\b|\Z)"
+    )
+    encontrado = padrao.search(texto)
+
+    # Fallback para PDFs cuja extração não preserva início de linha.
+    if not encontrado:
+        padrao = re.compile(
+            rf"(?ms)(?<!\d){numero}\b.*?(?=\n\s*\d+(?:\.\d+){{2,}}\b|\Z)"
+        )
+        encontrado = padrao.search(texto)
+
+    if not encontrado:
+        return None
+
+    trecho = encontrado.group(0).strip()
+    return trecho if trecho else None
+
+
+def localizar_documento_para_item(pergunta: str) -> dict | None:
+    pergunta_normalizada = normalizar(pergunta)
+    candidatos = carregar_documentos()
+
+    # Se a pergunta mencionar uma IT específica, prioriza o arquivo correspondente.
+    numeros_it = re.findall(r"\bit\s*(?:n[ºo°]?\s*)?(\d{1,2})\s*[-/]\s*25\b", pergunta.lower())
+    if not numeros_it:
+        numeros_it = re.findall(r"\bit\s*(?:n[ºo°]?\s*)?(\d{1,2})\s*[/ -]?\s*2025\b", pergunta.lower())
+
+    if numeros_it:
+        numero = int(numeros_it[0])
+        candidatos_prioritarios = [
+            doc for doc in candidatos
+            if re.search(rf"\bit\s*(?:n[ºo°]?\s*)?0?{numero}\s*[-/]\s*25\b", doc["arquivo"].lower())
+        ]
+        if candidatos_prioritarios:
+            return candidatos_prioritarios[0]
+
+    # Fallback: procura o documento pelo maior número de termos da pergunta.
+    melhor = None
+    melhor_score = 0
+    for doc in candidatos:
+        score = len(set(pergunta_normalizada).intersection(set(normalizar(doc["arquivo"]))))
+        if score > melhor_score:
+            melhor = doc
+            melhor_score = score
+    return melhor
+
+
+def responder_transcricao_literal(pergunta: str) -> str | None:
+    numero_item = extrair_numero_item(pergunta)
+    if not numero_item:
+        return None
+
+    documento = localizar_documento_para_item(pergunta)
+    if not documento:
+        return None
+
+    trecho = extrair_item_literal(documento["texto"], numero_item)
+    if trecho:
+        return trecho
+    return None
+
+
 def gerar_resposta_local(client, pergunta: str, resultados: list[dict]):
     contexto = "\n\n".join(
         f"[FONTE LOCAL: {item['arquivo']}]\n{item['texto']}"
@@ -135,8 +221,17 @@ def gerar_resposta_local(client, pergunta: str, resultados: list[dict]):
 MODO: BASE LOCAL.
 
 Responda exclusivamente com base no conteúdo abaixo.
-Se o conteúdo não permitir responder, diga: "A base local não contém informação suficiente para responder com segurança."
-Não use pesquisa na internet neste modo.
+
+REGRA DE SUFICIÊNCIA:
+- Se o conteúdo fornecido permitir responder com segurança, responda normalmente.
+- Se o conteúdo fornecido NÃO permitir responder com segurança, responda SOMENTE com o marcador {LIMITE_INSUFICIENTE}.
+- Não use conhecimento próprio para preencher lacunas.
+- Não use pesquisa na internet neste modo.
+
+REGRA DE TRANSCRIÇÃO:
+- Se o usuário pedir transcrição literal, texto literal, reprodução exata ou transcrição de item, NÃO parafraseie, NÃO resuma e NÃO complete o texto.
+- Preserve a redação do conteúdo fornecido exatamente como aparece, inclusive números, unidades, alíneas e referências.
+- Se o trecho literal solicitado não estiver presente no conteúdo fornecido, responda somente com {LIMITE_INSUFICIENTE}.
 
 CONTEÚDO DA BASE:
 {contexto}
@@ -148,7 +243,7 @@ PERGUNTA DO USUÁRIO:
     return client.models.generate_content(
         model=MODEL,
         contents=prompt,
-        config=types.GenerateContentConfig(temperature=0.1),
+        config=types.GenerateContentConfig(temperature=0.0),
     )
 
 
@@ -174,7 +269,7 @@ PERGUNTA DO USUÁRIO:
         contents=prompt,
         config=types.GenerateContentConfig(
             tools=[ferramenta_pesquisa],
-            temperature=0.1,
+            temperature=0.0,
         ),
     )
 
@@ -222,13 +317,41 @@ if st.button("Perguntar", type="primary"):
     else:
         try:
             client = genai.Client(api_key=st.secrets["GEMINI_API_KEY"])
+
+            # Para pedidos de transcrição literal, tenta primeiro uma extração
+            # determinística diretamente do PDF, sem deixar o modelo reescrever.
+            if eh_pedido_transcricao_literal(pergunta):
+                transcricao = responder_transcricao_literal(pergunta)
+                if transcricao:
+                    documento = localizar_documento_para_item(pergunta)
+                    st.caption("Fonte: base local do ROMUS.IA — transcrição direta do documento")
+                    st.markdown("### ROMUS.IA")
+                    st.text(transcricao)
+                    if documento:
+                        with st.expander("Documento utilizado"):
+                            st.write(f"**{documento['arquivo']}**")
+                    st.stop()
+
             resultados = buscar_base(pergunta)
 
             if resultados:
                 st.caption("Fonte: base local do ROMUS.IA")
                 resposta = gerar_resposta_local(client, pergunta, resultados)
-                st.markdown("### ROMUS.IA")
-                st.write(resposta.text)
+                texto_resposta = (resposta.text or "").strip()
+
+                # Se a própria análise local detectar insuficiência, libera o fallback web.
+                if texto_resposta == LIMITE_INSUFICIENTE:
+                    if pesquisar_web_se_necessario:
+                        st.caption("Fonte: pesquisa na internet (base local insuficiente)")
+                        resposta = gerar_resposta_web(client, pergunta)
+                        st.markdown("### ROMUS.IA")
+                        st.write(resposta.text)
+                        mostrar_fontes_web(resposta)
+                    else:
+                        st.info("A base local não contém informação suficiente para responder. A pesquisa na web está desativada.")
+                else:
+                    st.markdown("### ROMUS.IA")
+                    st.write(texto_resposta)
 
                 with st.expander("Documentos encontrados na base"):
                     for item in resultados:
