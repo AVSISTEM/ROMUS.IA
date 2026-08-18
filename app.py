@@ -94,8 +94,8 @@ def refs(question):
 
 
 def grupos(question):
-    q = norm(question).upper()
-    return set(re.findall(r"\b[A-Z]{1,3}-\d{1,3}\b", q))
+    # Não usar norm() aqui: ele remove o hífen de códigos como F-11.
+    return set(re.findall(r"\b[A-Z]{1,3}-\d{1,3}\b", str(question).upper()))
 
 
 def eh_it(nome, numero, ano=2025):
@@ -179,7 +179,6 @@ def pagina_score(question, page_text, filename):
     bn = norm(page_text)
     score = 5 * len(q & b)
 
-    # Códigos de ocupação são restrições duras: F-11 não pode ser substituído por E-5/E-6.
     grupos_q = grupos(question)
     if grupos_q:
         grupos_p = grupos(page_text)
@@ -235,9 +234,6 @@ def recuperar(question, docs):
         if not d:
             continue
         mapa = {p: t for p, t in d["paginas"]}
-
-        # Para uma classificação explícita, primeiro entrega a página exata.
-        # Só adiciona vizinhas se ainda forem necessárias para completar tabela/regra.
         numeros = [item["pagina"]]
         if not grupos_q:
             numeros += [item["pagina"] - 1, item["pagina"] + 1]
@@ -249,12 +245,7 @@ def recuperar(question, docs):
             if chave in vistos:
                 continue
             vistos.add(chave)
-            escolhidos.append({
-                "arquivo": item["arquivo"],
-                "pagina": pagina,
-                "texto": mapa[pagina],
-                "score": item["score"] if pagina == item["pagina"] else max(1, item["score"] - 5),
-            })
+            escolhidos.append({"arquivo": item["arquivo"], "pagina": pagina, "texto": mapa[pagina], "score": item["score"] if pagina == item["pagina"] else max(1, item["score"] - 5)})
             if len(escolhidos) >= limite:
                 break
         if len(escolhidos) >= limite:
@@ -288,7 +279,6 @@ def resposta_valida(texto, question=""):
     if not texto or ABSTAIN in texto:
         return None
 
-    # Bloqueia vazamento de raciocínio/comentários internos.
     proibidos = [
         "wait,", "let's look", "i need to", "let me", "first,", "reasoning:",
         "analyzing", "vamos analisar", "vou analisar", "preciso verificar", "raciocinio:"
@@ -297,12 +287,9 @@ def resposta_valida(texto, question=""):
     if any(x in baixo for x in proibidos):
         return None
 
-    # A base é brasileira; uma resposta contendo esses marcadores em inglês é rejeitada.
     if re.search(r"\b(for|wait|let's|look|text|answer)\b", baixo) and re.search(r"\b(e-\d+|f-\d+)\b", baixo):
         return None
 
-    # Se o usuário perguntou por um código, a resposta não pode introduzir outro código
-    # como se fosse o código solicitado.
     qgrupos = grupos(question)
     if qgrupos:
         outros = set(re.findall(r"\b[A-Z]{1,3}-\d{1,3}\b", texto.upper())) - qgrupos
@@ -314,12 +301,10 @@ def resposta_valida(texto, question=""):
 
 def gerar_resposta(c, question, passages):
     ctx = contexto(passages)
-
     primeira = gerar(c, RAG_PROMPT.format(question=question, context=ctx))
     texto = resposta_valida(primeira.text, question)
     if texto:
         return texto
-
     segunda = gerar(c, EXTRACTIVE_PROMPT.format(question=question, context=ctx))
     return resposta_valida(segunda.text, question)
 
