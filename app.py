@@ -18,21 +18,20 @@ ABSTAIN = "A base local não contém informação suficiente para responder com 
 
 PROMPT = """Você é o ROMUS.IA, assistente técnico de segurança contra incêndio.
 
-Responda à pergunta usando SOMENTE o conteúdo existente em <contexto>.
+Responda usando SOMENTE o conteúdo existente em <contexto>.
 Não use conhecimento externo e não invente informações.
 
 REGRAS:
 - Responda diretamente à pergunta.
-- Se houver uma tabela, identifique primeiro a linha/código exato pedido e depois a coluna correspondente.
-- Se a pergunta mencionar F-11, use somente F-11. Não substitua por E-5, E-6 ou qualquer outro código.
+- Se houver tabela, localize primeiro a linha/código exato pedido e depois a coluna correspondente.
+- Se a pergunta mencionar F-11, use somente F-11. Não substitua por E-5, E-6 ou outro grupo.
 - Preserve exatamente números, unidades, datas, itens e referências encontrados no contexto.
 - Faça cálculos somente quando todos os valores necessários estiverem no contexto.
-- Se o contexto contiver informação suficiente, responda. Não diga que não pode responder.
-- Se o contexto não contiver informação suficiente, responda exatamente:
-A base local não contém informação suficiente para responder com segurança.
-- Não mostre raciocínio, rascunho, análise, pensamentos ou comentários internos.
-- Não escreva em inglês.
-- Informe ao final, de forma curta, o documento e a página utilizados quando essa informação estiver disponível.
+- Se houver informação suficiente no contexto, responda.
+- Se não houver informação suficiente, responda exatamente: A base local não contém informação suficiente para responder com segurança.
+- Não mostre raciocínio, análise ou comentários internos.
+- Responda em português do Brasil.
+- Informe ao final, de forma curta, o documento e a página utilizados.
 
 <contexto>
 {context}
@@ -45,21 +44,41 @@ A base local não contém informação suficiente para responder com segurança.
 RESPOSTA:
 """
 
+RETRY_PROMPT = """Responda esta pergunta exclusivamente com base nas evidências fornecidas.
+
+Não explique o processo. Não faça suposições. Não use conhecimento externo.
+Extraia da evidência a informação exata solicitada, inclusive de tabelas.
+Se a pergunta pedir quantidade e largura, informe ambos e faça o cálculo somente se os valores estiverem na evidência.
+Se houver um código de grupo na pergunta, use somente esse código.
+
+EVIDÊNCIAS:
+{context}
+
+PERGUNTA:
+{question}
+
+RESPOSTA DIRETA EM PORTUGUÊS:
+"""
+
 WEB_PROMPT = """Responda à pergunta usando somente fontes oficiais ou técnicas confiáveis encontradas na pesquisa.
 Não invente informações. Seja objetivo, em português do Brasil.
 Informe as fontes utilizadas."""
+
 
 def normalizar(texto):
     texto = unicodedata.normalize("NFKD", str(texto).lower())
     texto = "".join(c for c in texto if not unicodedata.combining(c))
     return re.sub(r"\s+", " ", re.sub(r"[^\w\s]", " ", texto)).strip()
 
+
 def tokens(texto):
     return {x for x in normalizar(texto).split() if len(x) > 1}
+
 
 def grupos(texto):
     encontrados = re.findall(r"\b([A-Z]{1,3})\s*[-–—]?\s*(\d{1,3})\b", str(texto).upper())
     return {f"{a}-{b}" for a, b in encontrados if a != "IT"}
+
 
 def it_referenciada(question):
     q = normalizar(question)
@@ -70,6 +89,7 @@ def it_referenciada(question):
     if ano < 100:
         ano += 2000
     return int(m.group(1)), ano
+
 
 @st.cache_data(show_spinner=False)
 def assinatura_base():
@@ -83,6 +103,7 @@ def assinatura_base():
             except OSError:
                 pass
     return tuple(dados)
+
 
 @st.cache_data(show_spinner=False)
 def catalogo(sig):
@@ -99,6 +120,7 @@ def catalogo(sig):
                 "mtime": s.st_mtime_ns,
             })
     return saida
+
 
 @st.cache_data(show_spinner=False)
 def ler(arquivo, tamanho, mtime):
@@ -124,6 +146,7 @@ def ler(arquivo, tamanho, mtime):
     total = "\n\n".join(t for _, t in paginas)
     return {"arquivo": arquivo, "nome": p.name, "paginas": paginas, "hash": hashlib.sha256(total.encode()).hexdigest()}
 
+
 def escolher_documentos(question, catalogo_docs):
     ref = it_referenciada(question)
     if ref:
@@ -146,6 +169,7 @@ def escolher_documentos(question, catalogo_docs):
 
     ranked = sorted(catalogo_docs, key=lambda d: len(q & set(d["nome_norm"].split())), reverse=True)
     return ranked[:5]
+
 
 def pontuar_pagina(question, texto):
     q = tokens(question)
@@ -175,6 +199,7 @@ def pontuar_pagina(question, texto):
     score += 10 * len(nums_q & nums_p)
     return score
 
+
 def trecho_relevante(texto, question):
     linhas = [x.strip() for x in str(texto).splitlines() if x.strip()]
     if len(linhas) <= 40:
@@ -201,6 +226,7 @@ def trecho_relevante(texto, question):
             escolhidos.add(j)
     return "\n".join(linhas[i] for i in sorted(escolhidos))
 
+
 def recuperar(question, docs):
     candidatos = []
     for doc in docs:
@@ -221,15 +247,18 @@ def recuperar(question, docs):
             break
     return saida
 
+
 def contexto(passagens):
     return "\n\n".join(
         f"[EVIDÊNCIA {i}]\nDocumento: {p['arquivo']}\nPágina: {p['pagina']}\n{p['texto']}"
         for i, p in enumerate(passagens, start=1)
     )
 
+
 def cliente():
     chave = st.secrets.get("GEMINI_API_KEY", os.getenv("GEMINI_API_KEY", ""))
     return genai.Client(api_key=chave) if chave else None
+
 
 def gerar_resposta(c, question, passagens):
     resposta = c.models.generate_content(
@@ -239,25 +268,65 @@ def gerar_resposta(c, question, passagens):
     )
     return (resposta.text or "").strip()
 
+
+def gerar_resposta_retry(c, question, passagens):
+    resposta = c.models.generate_content(
+        model=MODEL,
+        contents=RETRY_PROMPT.format(question=question, context=contexto(passagens)),
+        config=types.GenerateContentConfig(temperature=0, max_output_tokens=700),
+    )
+    return (resposta.text or "").strip()
+
+
 def validar(texto, question):
     if not texto or ABSTAIN in texto:
         return None
-    proibidos = ("wait,", "let's look", "i need to", "let me", "reasoning:", "analyzing", "vamos analisar", "vou analisar", "preciso verificar", "raciocínio:", "raciocinio:")
+    proibidos = (
+        "wait,", "let's look", "i need to", "let me", "reasoning:",
+        "analyzing", "vamos analisar", "vou analisar", "preciso verificar",
+        "raciocínio:", "raciocinio:"
+    )
     baixo = texto.lower()
     if any(x in baixo for x in proibidos):
         return None
     grupos_q = grupos(question)
+    if grupos_q and not grupos_q.issubset(grupos(texto)):
+        return None
     if grupos_q and (grupos(texto) - grupos_q):
         return None
     return texto
+
+
+def responder_local(c, question, passagens):
+    if not c or not passagens:
+        return None
+    try:
+        primeira = validar(gerar_resposta(c, question, passagens), question)
+        if primeira:
+            return primeira
+    except Exception:
+        pass
+    try:
+        segunda = validar(gerar_resposta_retry(c, question, passagens), question)
+        if segunda:
+            return segunda
+    except Exception:
+        pass
+    return None
+
 
 def pesquisar_web(c, question):
     resposta = c.models.generate_content(
         model=MODEL,
         contents=WEB_PROMPT + "\n\nPERGUNTA:\n" + question,
-        config=types.GenerateContentConfig(temperature=0, max_output_tokens=800, tools=[types.Tool(google_search=types.GoogleSearch())]),
+        config=types.GenerateContentConfig(
+            temperature=0,
+            max_output_tokens=800,
+            tools=[types.Tool(google_search=types.GoogleSearch())],
+        ),
     )
     return (resposta.text or "").strip()
+
 
 def mostrar_fontes(passagens):
     if not passagens:
@@ -265,6 +334,7 @@ def mostrar_fontes(passagens):
     with st.expander("Documentos encontrados na base"):
         for p in passagens:
             st.write(f"• {p['arquivo']} — página {p['pagina']}")
+
 
 st.title("ROMUS.IA")
 st.caption("Inteligência artificial técnica e objetiva.")
@@ -275,12 +345,14 @@ with c1:
     perguntar = st.button("Perguntar", type="primary")
 with c2:
     recarregar = st.button("Recarregar base")
+
 if recarregar:
     st.cache_data.clear()
     st.rerun()
 
 if perguntar and question.strip():
     question = question.strip()
+
     with st.spinner("Localizando documentos..."):
         cat = catalogo(assinatura_base())
         docs = []
@@ -290,30 +362,42 @@ if perguntar and question.strip():
             if doc and doc["hash"] not in hashes:
                 docs.append(doc)
                 hashes.add(doc["hash"])
+
     with st.spinner("Localizando as páginas relevantes..."):
         passagens = recuperar(question, docs)
-    st.caption("Fonte: base local do ROMUS.IA")
+
     c = cliente()
     resposta = None
+
     if c and passagens:
         with st.spinner("Consultando a evidência local..."):
-            try:
-                resposta = validar(gerar_resposta(c, question, passagens), question)
-            except Exception:
-                resposta = None
+            resposta = responder_local(c, question, passagens)
+
     st.markdown("### ROMUS.IA")
+
     if resposta:
+        st.caption("Fonte: base local do ROMUS.IA")
         st.write(resposta)
         mostrar_fontes(passagens)
         st.stop()
-    if web_ok and c and not passagens:
-        try:
-            web_text = pesquisar_web(c, question)
-        except Exception:
-            web_text = ""
+
+    # Se a base foi encontrada mas o Gemini local falhou, o fallback web
+    # também deve funcionar. O código anterior só fazia isso quando
+    # passagens == [] e produzia um falso aviso de base insuficiente.
+    if web_ok and c:
+        with st.spinner("Base local não respondeu. Consultando fontes técnicas na web..."):
+            try:
+                web_text = pesquisar_web(c, question)
+            except Exception:
+                web_text = ""
         if web_text:
-            st.caption("Fonte: pesquisa na internet — base local insuficiente")
+            st.caption("Fonte: pesquisa na internet — resposta local indisponível")
             st.write(web_text)
+            mostrar_fontes(passagens)
             st.stop()
-    st.warning(ABSTAIN)
+
+    if passagens:
+        st.error("A evidência foi localizada, mas não foi possível gerar uma resposta válida.")
+    else:
+        st.warning(ABSTAIN)
     mostrar_fontes(passagens)
