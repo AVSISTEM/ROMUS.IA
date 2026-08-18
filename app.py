@@ -14,9 +14,11 @@ st.set_page_config(
 
 BASE_DIR = Path(__file__).parent
 KNOWLEDGE_DIR = BASE_DIR / "base_conhecimento"
-MODEL = "gemini-3.6-flash"
+# Modelo mais econômico para reduzir consumo da cota da API.
+MODEL = "gemini-2.5-flash-lite"
 MAX_CHUNKS = 5
 MIN_SCORE = 2
+LIMITE_INSUFICIENTE = "__BASE_INSUFICIENTE__"
 
 SYSTEM_PROMPT = """
 Você é o ROMUS.IA.
@@ -37,8 +39,6 @@ REGRAS GERAIS
 8. Se a informação não puder ser confirmada, diga isso claramente.
 """
 
-LIMITE_INSUFICIENTE = "__BASE_INSUFICIENTE__"
-
 
 def normalizar(texto: str) -> list[str]:
     texto = texto.lower()
@@ -49,21 +49,15 @@ def normalizar(texto: str) -> list[str]:
 def ler_arquivo(caminho: Path) -> str:
     if caminho.suffix.lower() in {".txt", ".md"}:
         return caminho.read_text(encoding="utf-8", errors="ignore")
-
     if caminho.suffix.lower() == ".pdf":
         reader = PdfReader(str(caminho))
-        paginas = []
-        for pagina in reader.pages:
-            paginas.append(pagina.extract_text() or "")
-        return "\n".join(paginas)
-
+        return "\n".join((pagina.extract_text() or "") for pagina in reader.pages)
     return ""
 
 
 def carregar_documentos() -> list[dict]:
     KNOWLEDGE_DIR.mkdir(parents=True, exist_ok=True)
     documentos = []
-
     for caminho in KNOWLEDGE_DIR.rglob("*"):
         if caminho.is_file() and caminho.suffix.lower() in {".txt", ".md", ".pdf"}:
             try:
@@ -75,7 +69,6 @@ def carregar_documentos() -> list[dict]:
                     })
             except Exception:
                 continue
-
     return documentos
 
 
@@ -83,7 +76,6 @@ def dividir_em_blocos(texto: str, tamanho: int = 1800, sobreposicao: int = 250) 
     texto = re.sub(r"\n{3,}", "\n\n", texto).strip()
     if len(texto) <= tamanho:
         return [texto]
-
     blocos = []
     inicio = 0
     while inicio < len(texto):
@@ -114,14 +106,11 @@ def buscar_base(pergunta: str) -> list[dict]:
     termos = set(normalizar(pergunta))
     if not termos:
         return []
-
     resultados = []
     for item in construir_indice():
-        intersecao = termos.intersection(item["termos"])
-        score = len(intersecao)
+        score = len(termos.intersection(item["termos"]))
         if score >= MIN_SCORE:
             resultados.append({**item, "score": score})
-
     resultados.sort(key=lambda x: x["score"], reverse=True)
     return resultados[:MAX_CHUNKS]
 
@@ -133,34 +122,18 @@ def extrair_numero_item(pergunta: str) -> str | None:
 
 def eh_pedido_transcricao_literal(pergunta: str) -> bool:
     termos = normalizar(pergunta)
-    return any(
-        termo in termos
-        for termo in {"transcreva", "transcrever", "literalmente", "literal", "exatamente", "exato"}
-    )
+    return any(t in termos for t in {"transcreva", "transcrever", "literalmente", "literal", "exatamente", "exato"})
 
 
 def extrair_item_literal(texto: str, numero_item: str) -> str | None:
-    """Extrai literalmente um item numerado do texto extraído do PDF.
-    Não usa o Gemini para reescrever o conteúdo.
-    """
     numero = re.escape(numero_item)
-
-    # Primeiro tenta localizar o item no início de uma linha.
-    padrao = re.compile(
-        rf"(?ms)^\s*{numero}\b.*?(?=^\s*\d+(?:\.\d+){{2,}}\b|\Z)"
-    )
+    padrao = re.compile(rf"(?ms)^\s*{numero}\b.*?(?=^\s*\d+(?:\.\d+){{2,}}\b|\Z)")
     encontrado = padrao.search(texto)
-
-    # Fallback para PDFs cuja extração não preserva início de linha.
     if not encontrado:
-        padrao = re.compile(
-            rf"(?ms)(?<!\d){numero}\b.*?(?=\n\s*\d+(?:\.\d+){{2,}}\b|\Z)"
-        )
+        padrao = re.compile(rf"(?ms)(?<!\d){numero}\b.*?(?=\n\s*\d+(?:\.\d+){{2,}}\b|\Z)")
         encontrado = padrao.search(texto)
-
     if not encontrado:
         return None
-
     trecho = encontrado.group(0).strip()
     return trecho if trecho else None
 
@@ -168,12 +141,9 @@ def extrair_item_literal(texto: str, numero_item: str) -> str | None:
 def localizar_documento_para_item(pergunta: str) -> dict | None:
     pergunta_normalizada = normalizar(pergunta)
     candidatos = carregar_documentos()
-
-    # Se a pergunta mencionar uma IT específica, prioriza o arquivo correspondente.
     numeros_it = re.findall(r"\bit\s*(?:n[ºo°]?\s*)?(\d{1,2})\s*[-/]\s*25\b", pergunta.lower())
     if not numeros_it:
         numeros_it = re.findall(r"\bit\s*(?:n[ºo°]?\s*)?(\d{1,2})\s*[/ -]?\s*2025\b", pergunta.lower())
-
     if numeros_it:
         numero = int(numeros_it[0])
         candidatos_prioritarios = [
@@ -182,8 +152,6 @@ def localizar_documento_para_item(pergunta: str) -> dict | None:
         ]
         if candidatos_prioritarios:
             return candidatos_prioritarios[0]
-
-    # Fallback: procura o documento pelo maior número de termos da pergunta.
     melhor = None
     melhor_score = 0
     for doc in candidatos:
@@ -198,23 +166,14 @@ def responder_transcricao_literal(pergunta: str) -> str | None:
     numero_item = extrair_numero_item(pergunta)
     if not numero_item:
         return None
-
     documento = localizar_documento_para_item(pergunta)
     if not documento:
         return None
-
-    trecho = extrair_item_literal(documento["texto"], numero_item)
-    if trecho:
-        return trecho
-    return None
+    return extrair_item_literal(documento["texto"], numero_item)
 
 
 def gerar_resposta_local(client, pergunta: str, resultados: list[dict]):
-    contexto = "\n\n".join(
-        f"[FONTE LOCAL: {item['arquivo']}]\n{item['texto']}"
-        for item in resultados
-    )
-
+    contexto = "\n\n".join(f"[FONTE LOCAL: {item['arquivo']}]\n{item['texto']}" for item in resultados)
     prompt = f"""
 {SYSTEM_PROMPT}
 
@@ -223,15 +182,19 @@ MODO: BASE LOCAL.
 Responda exclusivamente com base no conteúdo abaixo.
 
 REGRA DE SUFICIÊNCIA:
-- Se o conteúdo fornecido permitir responder com segurança, responda normalmente.
-- Se o conteúdo fornecido NÃO permitir responder com segurança, responda SOMENTE com o marcador {LIMITE_INSUFICIENTE}.
+- Se o conteúdo permitir responder com segurança, responda normalmente.
+- Se não permitir, responda SOMENTE com o marcador {LIMITE_INSUFICIENTE}.
 - Não use conhecimento próprio para preencher lacunas.
 - Não use pesquisa na internet neste modo.
 
+REGRA DE CÁLCULO:
+- Quando a norma fornecer uma fórmula, quantidade de unidades ou critério de dimensionamento, faça o cálculo solicitado usando somente os dados da base.
+- Mostre a fórmula e o resultado de forma objetiva.
+
 REGRA DE TRANSCRIÇÃO:
-- Se o usuário pedir transcrição literal, texto literal, reprodução exata ou transcrição de item, NÃO parafraseie, NÃO resuma e NÃO complete o texto.
-- Preserve a redação do conteúdo fornecido exatamente como aparece, inclusive números, unidades, alíneas e referências.
-- Se o trecho literal solicitado não estiver presente no conteúdo fornecido, responda somente com {LIMITE_INSUFICIENTE}.
+- Se o usuário pedir transcrição literal, não parafraseie, não resuma e não complete.
+- Preserve a redação do conteúdo fornecido.
+- Se o trecho não estiver presente, responda somente com {LIMITE_INSUFICIENTE}.
 
 CONTEÚDO DA BASE:
 {contexto}
@@ -239,7 +202,6 @@ CONTEÚDO DA BASE:
 PERGUNTA DO USUÁRIO:
 {pergunta}
 """
-
     return client.models.generate_content(
         model=MODEL,
         contents=prompt,
@@ -262,15 +224,11 @@ Apresente as fontes utilizadas ao final quando elas estiverem disponíveis.
 PERGUNTA DO USUÁRIO:
 {pergunta}
 """
-
     ferramenta_pesquisa = types.Tool(google_search=types.GoogleSearch())
     return client.models.generate_content(
         model=MODEL,
         contents=prompt,
-        config=types.GenerateContentConfig(
-            tools=[ferramenta_pesquisa],
-            temperature=0.0,
-        ),
+        config=types.GenerateContentConfig(tools=[ferramenta_pesquisa], temperature=0.0),
     )
 
 
@@ -285,7 +243,6 @@ def mostrar_fontes_web(resposta):
                 titulo = getattr(web, "title", None) or web.uri
                 if web.uri not in [u[1] for u in urls]:
                     urls.append((titulo, web.uri))
-
         if urls:
             st.markdown("### Fontes consultadas")
             for titulo, url in urls[:8]:
@@ -294,14 +251,23 @@ def mostrar_fontes_web(resposta):
         pass
 
 
+def erro_e_quota(ex: Exception) -> bool:
+    texto = str(ex).upper()
+    return "429" in texto or "RESOURCE_EXHAUSTED" in texto or "QUOTA" in texto
+
+
+def mostrar_fallback_local(resultados: list[dict]):
+    st.warning("A cota da API Gemini foi atingida. O ROMUS não vai inventar uma resposta.")
+    st.markdown("### Trechos encontrados na base local")
+    for item in resultados:
+        st.markdown(f"**{item['arquivo']}** — relevância {item['score']}")
+        st.text(item["texto"])
+
+
 st.title("ROMUS.IA")
 st.subheader("Inteligência artificial técnica e objetiva.")
 
-pergunta = st.text_area(
-    "Digite sua pergunta:",
-    placeholder="Pergunte qualquer coisa...",
-    height=120,
-)
+pergunta = st.text_area("Digite sua pergunta:", placeholder="Pergunte qualquer coisa...", height=120)
 
 col1, col2 = st.columns(2)
 with col1:
@@ -316,54 +282,46 @@ if st.button("Perguntar", type="primary"):
         st.warning("Digite uma pergunta.")
     else:
         try:
-            client = genai.Client(api_key=st.secrets["GEMINI_API_KEY"])
-
-            # Para pedidos de transcrição literal, tenta primeiro uma extração
-            # determinística diretamente do PDF, sem deixar o modelo reescrever.
-            if eh_pedido_transcricao_literal(pergunta):
-                transcricao = responder_transcricao_literal(pergunta)
-                if transcricao:
-                    documento = localizar_documento_para_item(pergunta)
-                    st.caption("Fonte: base local do ROMUS.IA — transcrição direta do documento")
-                    st.markdown("### ROMUS.IA")
-                    st.text(transcricao)
-                    if documento:
-                        with st.expander("Documento utilizado"):
-                            st.write(f"**{documento['arquivo']}**")
-                    st.stop()
-
             resultados = buscar_base(pergunta)
+            client = genai.Client(api_key=st.secrets["GEMINI_API_KEY"])
 
             if resultados:
                 st.caption("Fonte: base local do ROMUS.IA")
-                resposta = gerar_resposta_local(client, pergunta, resultados)
-                texto_resposta = (resposta.text or "").strip()
-
-                # Se a própria análise local detectar insuficiência, libera o fallback web.
-                if texto_resposta == LIMITE_INSUFICIENTE:
-                    if pesquisar_web_se_necessario:
-                        st.caption("Fonte: pesquisa na internet (base local insuficiente)")
-                        resposta = gerar_resposta_web(client, pergunta)
+                try:
+                    resposta = gerar_resposta_local(client, pergunta, resultados)
+                    if LIMITE_INSUFICIENTE in (resposta.text or ""):
+                        if pesquisar_web_se_necessario:
+                            st.caption("Fonte: pesquisa na internet (base local insuficiente)")
+                            resposta = gerar_resposta_web(client, pergunta)
+                            st.markdown("### ROMUS.IA")
+                            st.write(resposta.text)
+                            mostrar_fontes_web(resposta)
+                        else:
+                            mostrar_fallback_local(resultados)
+                    else:
                         st.markdown("### ROMUS.IA")
                         st.write(resposta.text)
-                        mostrar_fontes_web(resposta)
+                        with st.expander("Documentos encontrados na base"):
+                            for item in resultados:
+                                st.write(f"**{item['arquivo']}** — relevância {item['score']}")
+                except Exception as ex:
+                    if erro_e_quota(ex):
+                        mostrar_fallback_local(resultados)
                     else:
-                        st.info("A base local não contém informação suficiente para responder. A pesquisa na web está desativada.")
-                else:
-                    st.markdown("### ROMUS.IA")
-                    st.write(texto_resposta)
-
-                with st.expander("Documentos encontrados na base"):
-                    for item in resultados:
-                        st.write(f"**{item['arquivo']}** — relevância {item['score']}")
+                        raise
 
             elif pesquisar_web_se_necessario:
                 st.caption("Fonte: pesquisa na internet")
-                resposta = gerar_resposta_web(client, pergunta)
-                st.markdown("### ROMUS.IA")
-                st.write(resposta.text)
-                mostrar_fontes_web(resposta)
-
+                try:
+                    resposta = gerar_resposta_web(client, pergunta)
+                    st.markdown("### ROMUS.IA")
+                    st.write(resposta.text)
+                    mostrar_fontes_web(resposta)
+                except Exception as ex:
+                    if erro_e_quota(ex):
+                        st.error("A cota da API Gemini foi atingida e não há conteúdo local suficiente para responder esta pergunta.")
+                    else:
+                        raise
             else:
                 st.info("A base local não contém informação suficiente para responder. A pesquisa na web está desativada.")
 
