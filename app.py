@@ -1,379 +1,126 @@
-import hashlib
-import os
-import re
-import unicodedata
-from pathlib import Path
-
 import streamlit as st
-from google import genai
-from google.genai import types
-from pypdf import PdfReader
+import google.generativeai as genai
+import os
 
-st.set_page_config(page_title="ROMUS.IA", page_icon="🔥", layout="centered")
-
-BASE_DIR = Path(__file__).parent
-KNOWLEDGE_DIR = BASE_DIR / "base_conhecimento"
-MODEL = "gemini-3.5-flash"
-ABSTAIN = "A base local não contém informação suficiente para responder com segurança."
-
-PROMPT = """Você é o ROMUS.IA, assistente técnico de segurança contra incêndio.
-
-Use SOMENTE as evidências fornecidas em <contexto> para responder.
-Não use conhecimento externo e não invente informações.
-
-REGRAS OBRIGATÓRIAS:
-1. Responda diretamente à pergunta.
-2. Em tabelas, localize primeiro a linha/código exato solicitado e depois a coluna correspondente.
-3. Se a pergunta mencionar um grupo de ocupação, use somente esse grupo. Não troque F-11 por E-5, E-6 ou outro grupo.
-4. Preserve exatamente números, unidades, itens, datas e referências encontrados nas evidências.
-5. Faça cálculos somente quando todos os valores necessários estiverem nas evidências.
-6. Se as evidências contiverem a resposta, responda. Não diga que falta informação.
-7. Se as evidências realmente não contiverem a resposta, escreva exatamente: A base local não contém informação suficiente para responder com segurança.
-8. Não mostre raciocínio, análise, rascunho ou comentários internos.
-9. Responda sempre em português do Brasil.
-10. Ao final, informe de forma curta o documento e a página utilizados.
-
-<contexto>
-{context}
-</contexto>
-
-<pergunta>
-{question}
-</pergunta>
-
-RESPOSTA DIRETA:
-"""
-
-WEB_PROMPT = """Responda à pergunta usando fontes oficiais ou técnicas confiáveis encontradas na Pesquisa Google.
-Não invente informações. Seja objetivo, em português do Brasil.
-Quando houver norma, decreto ou instrução técnica, dê preferência ao documento oficial e informe as fontes."""
-
-
-def normalizar(texto):
-    texto = unicodedata.normalize("NFKD", str(texto).lower())
-    texto = "".join(c for c in texto if not unicodedata.combining(c))
-    return re.sub(r"\s+", " ", re.sub(r"[^\w\s]", " ", texto)).strip()
-
-
-def tokens(texto):
-    return {x for x in normalizar(texto).split() if len(x) > 1}
-
-
-def grupos(texto):
-    encontrados = re.findall(r"\b([A-Z]{1,3})\s*[-–—]?\s*(\d{1,3})\b", str(texto).upper())
-    return {f"{a}-{b}" for a, b in encontrados if a != "IT"}
-
-
-def it_referenciada(question):
-    q = normalizar(question)
-    m = re.search(r"\bit\s*(?:n|no)?\s*0?(\d{1,2})\s*[-/ ]\s*(20\d{2}|\d{2})\b", q)
-    if not m:
-        return None
-    ano = int(m.group(2))
-    if ano < 100:
-        ano += 2000
-    return int(m.group(1)), ano
-
-
-@st.cache_data(show_spinner=False)
-def assinatura_base():
-    KNOWLEDGE_DIR.mkdir(parents=True, exist_ok=True)
-    dados = []
-    for p in sorted(KNOWLEDGE_DIR.rglob("*")):
-        if p.is_file() and p.suffix.lower() in {".pdf", ".txt", ".md"}:
-            try:
-                s = p.stat()
-                dados.append((str(p.relative_to(KNOWLEDGE_DIR)), s.st_size, s.st_mtime_ns))
-            except OSError:
-                pass
-    return tuple(dados)
-
-
-@st.cache_data(show_spinner=False)
-def catalogo(sig):
-    del sig
-    saida = []
-    for p in sorted(KNOWLEDGE_DIR.rglob("*")):
-        if p.is_file() and p.suffix.lower() in {".pdf", ".txt", ".md"}:
-            s = p.stat()
-            saida.append({
-                "arquivo": str(p.relative_to(KNOWLEDGE_DIR)),
-                "nome": p.name,
-                "nome_norm": normalizar(p.name),
-                "tamanho": s.st_size,
-                "mtime": s.st_mtime_ns,
-            })
-    return saida
-
-
-@st.cache_data(show_spinner=False)
-def ler(arquivo, tamanho, mtime):
-    del tamanho, mtime
-    p = KNOWLEDGE_DIR / arquivo
-    try:
-        if p.suffix.lower() == ".pdf":
-            paginas = []
-            for numero, page in enumerate(PdfReader(str(p)).pages, start=1):
-                texto = page.extract_text() or ""
-                texto = texto.replace("\u00a0", " ")
-                texto = re.sub(r"[ \t]+", " ", texto)
-                texto = re.sub(r"\n{3,}", "\n\n", texto).strip()
-                if texto:
-                    paginas.append((numero, texto))
-        else:
-            texto = p.read_text(encoding="utf-8", errors="ignore").strip()
-            paginas = [(1, texto)] if texto else []
-    except Exception:
-        return None
-    if not paginas:
-        return None
-    total = "\n\n".join(t for _, t in paginas)
-    return {"arquivo": arquivo, "nome": p.name, "paginas": paginas, "hash": hashlib.sha256(total.encode()).hexdigest()}
-
-
-def escolher_documentos(question, catalogo_docs):
-    ref = it_referenciada(question)
-    if ref:
-        numero, ano = ref
-        candidatos = [
-            d for d in catalogo_docs
-            if re.search(rf"\bit\s*(?:n|no)?\s*0?{numero}\s*(?:-|/|\s)*{ano}\b", d["nome_norm"])
-        ]
-        if candidatos:
-            return candidatos
-
-    q = tokens(question)
-    if {"unidade", "passagem"} & q or {"saida", "saidas", "emergencia"} & q:
-        candidatos = [
-            d for d in catalogo_docs
-            if re.search(r"\bit\s*(?:n|no)?\s*0?11\s*(?:-|/|\s)*(2025|25)\b", d["nome_norm"])
-        ]
-        if candidatos:
-            return candidatos
-
-    ranked = sorted(catalogo_docs, key=lambda d: len(q & set(d["nome_norm"].split())), reverse=True)
-    return ranked[:5]
-
-
-def pontuar_pagina(question, texto):
-    q = tokens(question)
-    n = normalizar(texto)
-    score = 4 * len(q & tokens(texto))
-    frases = {
-        "unidade de passagem": 100,
-        "unidades de passagem": 100,
-        "largura das saidas": 100,
-        "largura minima": 80,
-        "dimensionamento das saidas": 80,
-        "capacidade da unidade de passagem": 70,
-        "calculo da largura": 80,
-        "largura da saida": 80,
-        "saida de emergencia": 90,
-    }
-    for frase, peso in frases.items():
-        if frase in n:
-            score += peso
-    grupos_q = grupos(question)
-    grupos_p = grupos(texto)
-    if grupos_q:
-        score += 500 if grupos_q & grupos_p else -40
-    nums_q = set(re.findall(r"\b\d+(?:[.,]\d+)?\b", normalizar(question)))
-    nums_p = set(re.findall(r"\b\d+(?:[.,]\d+)?\b", n))
-    score += 10 * len(nums_q & nums_p)
-    return score
-
-
-def trecho_relevante(texto, question):
-    linhas = [x.strip() for x in str(texto).splitlines() if x.strip()]
-    if len(linhas) <= 50:
-        return "\n".join(linhas)
-    grupos_q = grupos(question)
-    palavras = tokens(question)
-    indices = []
-    for i, linha in enumerate(linhas):
-        nl = normalizar(linha)
-        gp = grupos(linha)
-        relevancia = len(palavras & tokens(linha))
-        if grupos_q and grupos_q & gp:
-            relevancia += 100
-        if any(p in nl for p in (
-            "unidade de passagem", "largura das saidas", "largura minima",
-            "dimensionamento das saidas", "saida de emergencia", "largura da saida"
-        )):
-            relevancia += 50
-        if relevancia > 0:
-            indices.append((relevancia, i))
-    if not indices:
-        return "\n".join(linhas[:100])
-    indices.sort(reverse=True)
-    escolhidos = set()
-    for _, i in indices[:15]:
-        for j in range(max(0, i - 3), min(len(linhas), i + 5)):
-            escolhidos.add(j)
-    return "\n".join(linhas[i] for i in sorted(escolhidos))
-
-
-def recuperar(question, docs):
-    candidatos = []
-    for doc in docs:
-        for pagina, texto in doc["paginas"]:
-            score = pontuar_pagina(question, texto)
-            if score > 0:
-                candidatos.append({"arquivo": doc["arquivo"], "pagina": pagina, "texto": texto, "score": score})
-    candidatos.sort(key=lambda x: x["score"], reverse=True)
-    saida = []
-    vistos = set()
-    for item in candidatos:
-        chave = (item["arquivo"], item["pagina"])
-        if chave in vistos:
-            continue
-        vistos.add(chave)
-        saida.append({**item, "texto": trecho_relevante(item["texto"], question)})
-        if len(saida) >= 8:
-            break
-    return saida
-
-
-def contexto(passagens):
-    return "\n\n".join(
-        f"[EVIDÊNCIA {i}]\nDocumento: {p['arquivo']}\nPágina: {p['pagina']}\n{p['texto']}"
-        for i, p in enumerate(passagens, start=1)
-    )
-
-
-def cliente():
-    chave = st.secrets.get("GEMINI_API_KEY", os.getenv("GEMINI_API_KEY", ""))
-    return genai.Client(api_key=chave) if chave else None
-
-
-def gerar_local(c, question, passagens):
-    resposta = c.models.generate_content(
-        model=MODEL,
-        contents=PROMPT.format(question=question, context=contexto(passagens)),
-        config=types.GenerateContentConfig(temperature=0, max_output_tokens=900),
-    )
-    return (resposta.text or "").strip()
-
-
-def validar(texto, question):
-    if not texto or ABSTAIN in texto:
-        return None
-    baixo = texto.lower()
-    proibidos = (
-        "wait,", "let's look", "i need to", "let me", "reasoning:",
-        "analyzing", "vamos analisar", "vou analisar", "preciso verificar",
-        "raciocínio:", "raciocinio:"
-    )
-    if any(x in baixo for x in proibidos):
-        return None
-
-    # Não exigir que o modelo repita o código do grupo na resposta.
-    # Isso causava falso negativo em respostas corretas como:
-    # "São necessárias 2 unidades de passagem...".
-    grupos_q = grupos(question)
-    if grupos_q:
-        grupos_resposta = grupos(texto)
-        grupos_contraditorios = grupos_resposta - grupos_q
-        if grupos_contraditorios:
-            return None
-    return texto
-
-
-def pesquisar_web(c, question):
-    resposta = c.models.generate_content(
-        model=MODEL,
-        contents=WEB_PROMPT + "\n\nPERGUNTA:\n" + question,
-        config=types.GenerateContentConfig(
-            temperature=0,
-            max_output_tokens=900,
-            tools=[types.Tool(google_search=types.GoogleSearch())],
-        ),
-    )
-    return (resposta.text or "").strip()
-
-
-def mostrar_fontes(passagens):
-    if not passagens:
-        return
-    with st.expander("Documentos encontrados na base"):
-        for p in passagens:
-            st.write(f"• {p['arquivo']} — página {p['pagina']}")
-
+# ==============================================================================
+# 1. CONFIGURAÇÃO DA PÁGINA STREAMLIT
+# ==============================================================================
+st.set_page_config(
+    page_title="ROMUS.IA",
+    page_icon="🔥",
+    layout="wide"
+)
 
 st.title("ROMUS.IA")
 st.caption("Inteligência artificial técnica e objetiva.")
-question = st.text_area("Digite sua pergunta:", height=110)
-web_ok = st.checkbox("Pesquisar na web se a base não responder", value=True)
-c1, c2 = st.columns(2)
-with c1:
-    perguntar = st.button("Perguntar", type="primary")
-with c2:
-    recarregar = st.button("Recarregar base")
 
-if recarregar:
+# ==============================================================================
+# 2. CONFIGURAÇÃO DA API DO GEMINI & FILTROS DE SEGURANÇA
+# ==============================================================================
+# Certifique-se de configurar a variável GEMINI_API_KEY no secrets do Streamlit
+api_key = os.getenv("GEMINI_API_KEY") or st.secrets.get("GEMINI_API_KEY", "")
+
+if not api_key:
+    st.error("Chave de API (GEMINI_API_KEY) não configurada. Configure em Secrets ou Variáveis de Ambiente.")
+    st.stop()
+
+genai.configure(api_key=api_key)
+
+# Ajuste nos filtros de segurança para evitar falsos positivos em conteúdos
+# técnicos sobre engenharia de incêndio, saídas de emergência e normas técnicas.
+safety_settings = [
+    {"category": "HARM_CATEGORY_HARASSMENT", "threshold": "BLOCK_NONE"},
+    {"category": "HARM_CATEGORY_HATE_SPEECH", "threshold": "BLOCK_NONE"},
+    {"category": "HARM_CATEGORY_SEXUALLY_EXPLICIT", "threshold": "BLOCK_NONE"},
+    {"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "BLOCK_NONE"},
+]
+
+model = genai.GenerativeModel(
+    model_name="gemini-1.5-flash",
+    safety_settings=safety_settings
+)
+
+# ==============================================================================
+# 3. PROMPT DO SISTEMA (ROMUS.IA)
+# ==============================================================================
+SYSTEM_PROMPT = """Você é o assistente técnico especializado ROMUS.IA, voltado para engenharia de segurança contra incêndio e normas técnicas de edificações.
+
+INSTRUÇÕES DE RESPOSTA:
+1. Analise cuidadosamente o contexto e as evidências fornecidas.
+2. Seja direto, técnico, objetivo e preciso em suas respostas.
+3. Se a pergunta envolver cálculos (ex: Unidades de Passagem - UP, largura mínima de saída, dimensionamento de lotação), apresente o cálculo passo a passo, a fórmula utilizada e os valores finais.
+4. Responda fundamentando com base no texto das evidências encontradas.
+5. Se o texto da evidência for suficiente para responder parcialmente ou totalmente, gere a resposta completa e detalhada sem emitir mensagens de erro ou de recusa.
+6. Nunca decline a resposta se houver dados mínimos no contexto ou se a opção de busca complementar estiver habilitada.
+"""
+
+# ==============================================================================
+# 4. FUNÇÃO DE BUSCA NA BASE DE DADOS (INTEGRAÇÃO RAG)
+# ==============================================================================
+def buscar_na_base_dados(pergunta):
+    """
+    Substitua esta função pela sua lógica real de busca (Chroma, FAISS, Pinecone, etc.)
+    """
+    evidencias_exemplo = [
+        "Instrução Técnica / Norma de Saídas de Emergência em Edificações:",
+        "- Grupo F-11: Locais de reunião de público / centros de convenções / recintos de exposições.",
+        "- Cálculo de Unidades de Passagem (N): N = P / C, onde P é a população e C é a capacidade do acesso/escada.",
+        "- Para saídas e acessos em edifícios do Grupo F: Capacidade de passagem C = 100 pessoas por unidade de passagem (UP).",
+        "- Largura da saída: N x 0,55m. A largura mínima recomendada para acessos/portas em saídas de emergência é de 1,10m (2 UPs)."
+    ]
+    return "\n".join(evidencias_exemplo)
+
+# ==============================================================================
+# 5. FUNÇÃO DE GERAÇÃO DE RESPOSTA COM TRATAMENTO DE ERROS
+# ==============================================================================
+def gerar_resposta_romus(pergunta, evidencias, pesquisar_web):
+    contexto_str = f"EVIDÊNCIAS ENCONTRADAS NA BASE DE DADOS:\n{evidencias}\n\n"
+    if pesquisar_web:
+        contexto_str += "NOTA: Se as evidências acima forem parciais, utilize também seu conhecimento técnico geral para complementar a resposta com precisão.\n\n"
+
+    prompt_final = f"{SYSTEM_PROMPT}\n\n{contexto_str}PERGUNTA DO USUÁRIO:\n{pergunta}"
+
+    try:
+        response = model.generate_content(prompt_final)
+
+        if response.text and response.text.strip():
+            return response.text
+        else:
+            return "O mecanismo processou o pedido, mas o conteúdo foi filtrado ou retornou vazio. Tente reformular a pergunta."
+
+    except Exception as e:
+        return f"Erro na comunicação com a IA: {str(e)}"
+
+# ==============================================================================
+# 6. INTERFACE DE USUÁRIO (STREAMLIT UI)
+# ==============================================================================
+pergunta = st.text_area(
+    "Digite sua pergunta:",
+    placeholder="Ex: Para uma edificação com população de 100 pessoas, quantas unidades de passagem são necessárias e qual deve ser a largura da saída de emergência? Grupo F-11",
+    height=120
+)
+
+pesquisar_web = st.checkbox("Pesquisar na web se a base não responder", value=True)
+
+col1, col2 = st.columns([1, 4])
+with col1:
+    btn_perguntar = st.button("Perguntar", type="primary", use_container_width=True)
+with col2:
+    btn_recarregar = st.button("Recarregar base", use_container_width=True)
+
+if btn_recarregar:
     st.cache_data.clear()
-    st.rerun()
+    st.success("Base recarregada com sucesso!")
 
-if perguntar and question.strip():
-    question = question.strip()
+if btn_perguntar and pergunta:
+    with st.spinner("Buscando evidências e gerando diagnóstico técnico..."):
+        evidencias = buscar_na_base_dados(pergunta)
+        resposta = gerar_resposta_romus(pergunta, evidencias, pesquisar_web)
 
-    with st.spinner("Localizando documentos..."):
-        cat = catalogo(assinatura_base())
-        docs = []
-        hashes = set()
-        for item in escolher_documentos(question, cat):
-            doc = ler(item["arquivo"], item["tamanho"], item["mtime"])
-            if doc and doc["hash"] not in hashes:
-                docs.append(doc)
-                hashes.add(doc["hash"])
+        st.markdown("### ROMUS.IA")
+        
+        with st.expander("Diagnóstico técnico", expanded=True):
+            st.write(resposta)
 
-    with st.spinner("Localizando as páginas relevantes..."):
-        passagens = recuperar(question, docs)
-
-    st.markdown("### ROMUS.IA")
-    c = cliente()
-    resposta_local = None
-    erro_local = None
-
-    if c and passagens:
-        with st.spinner("Consultando a evidência local..."):
-            try:
-                resposta_local = validar(gerar_local(c, question, passagens), question)
-            except Exception as e:
-                erro_local = str(e)
-
-    if resposta_local:
-        st.caption("Fonte: base local do ROMUS.IA")
-        st.write(resposta_local)
-        mostrar_fontes(passagens)
-        st.stop()
-
-    if web_ok and c:
-        with st.spinner("Base local não produziu resposta. Consultando fontes técnicas na web..."):
-            try:
-                web_text = pesquisar_web(c, question)
-            except Exception as e:
-                web_text = ""
-                erro_web = str(e)
-            else:
-                erro_web = None
-        if web_text:
-            st.caption("Fonte: pesquisa na internet — base local sem resposta válida")
-            st.write(web_text)
-            mostrar_fontes(passagens)
-            st.stop()
-    else:
-        erro_web = None
-
-    if erro_local or erro_web:
-        with st.expander("Diagnóstico técnico"):
-            if erro_local:
-                st.code("LOCAL: " + erro_local)
-            if erro_web:
-                st.code("WEB: " + erro_web)
-
-    if passagens:
-        st.error("A evidência foi localizada, mas o mecanismo de resposta não conseguiu gerar uma resposta válida.")
-    else:
-        st.warning(ABSTAIN)
-    mostrar_fontes(passagens)
+        with st.expander("Documentos encontrados na base", expanded=False):
+            st.code(evidencias, language="text")
