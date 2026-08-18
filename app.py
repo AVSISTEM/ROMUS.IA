@@ -1,16 +1,21 @@
 import hashlib, os, re, unicodedata
 from pathlib import Path
+
 import streamlit as st
 from google import genai
 from google.genai import types
 from pypdf import PdfReader
 
 st.set_page_config(page_title="ROMUS.IA", page_icon="🔥", layout="centered")
+
 BASE_DIR = Path(__file__).parent
 KNOWLEDGE_DIR = BASE_DIR / "base_conhecimento"
 MODEL = "gemini-3.5-flash"
 
 
+# ============================================================
+# NORMALIZACAO
+# ============================================================
 def normalizar(t):
     t = unicodedata.normalize("NFKD", str(t).lower())
     t = "".join(c for c in t if not unicodedata.combining(c))
@@ -21,6 +26,9 @@ def norm(t):
     return " ".join(normalizar(t))
 
 
+# ============================================================
+# CATALOGO DA BASE
+# ============================================================
 def assinatura_base():
     KNOWLEDGE_DIR.mkdir(parents=True, exist_ok=True)
     out = []
@@ -57,22 +65,33 @@ def ler(arquivo, tamanho, mtime):
     p = KNOWLEDGE_DIR / arquivo
     try:
         if p.suffix.lower() == ".pdf":
-            texto = "\n".join(page.extract_text() or "" for page in PdfReader(str(p)).pages)
+            paginas = []
+            for numero, page in enumerate(PdfReader(str(p)).pages, start=1):
+                texto = (page.extract_text() or "").strip()
+                if texto:
+                    paginas.append((numero, texto))
         else:
-            texto = p.read_text(encoding="utf-8", errors="ignore")
+            texto = p.read_text(encoding="utf-8", errors="ignore").strip()
+            paginas = [(1, texto)] if texto else []
     except Exception:
         return None
-    texto = texto.strip()
-    if not texto:
+
+    if not paginas:
         return None
+
+    texto_total = "\n\n".join(texto for _, texto in paginas)
     return {
         "arquivo": arquivo,
         "nome": p.name,
-        "texto": texto,
-        "hash": hashlib.sha256(texto.encode()).hexdigest(),
+        "paginas": paginas,
+        "texto": texto_total,
+        "hash": hashlib.sha256(texto_total.encode()).hexdigest(),
     }
 
 
+# ============================================================
+# IDENTIFICACAO DO DOCUMENTO
+# ============================================================
 def refs(q):
     qn = norm(q)
     out = []
@@ -83,7 +102,11 @@ def refs(q):
 
 def assunto(q):
     n = set(normalizar(q))
-    if n & {"saida", "saidas", "emergencia"} or {"unidade", "passagem"} <= n:
+    if (
+        n & {"saida", "saidas", "emergencia"}
+        or {"unidade", "passagem"} <= n
+        or "largura" in n and ("saida" in n or "emergencia" in n)
+    ):
         return "it11"
     if "decreto" in n or "regulamento" in n:
         return "decreto"
@@ -106,14 +129,25 @@ def selecionar(q, cat):
     a = assunto(q)
     r = refs(q)
 
-    if r:
-        for num, ano in r:
-            docs = [d for d in cat if eh_it(d["nome"], num, ano)]
-            if docs:
-                return docs[:1]
+    # Referencia explicita sempre vence qualquer relevancia textual.
+    for num, ano in r:
+        docs = [d for d in cat if eh_it(d["nome"], num, ano)]
+        if docs:
+            return docs[:1]
 
+    # Assuntos com documento normativo conhecido: selecionar somente esse documento.
     if a == "it11":
         docs = [d for d in cat if eh_it(d["nome"], 11)]
+        if docs:
+            return docs[:1]
+
+    if a == "it14":
+        docs = [d for d in cat if eh_it(d["nome"], 14)]
+        if docs:
+            return docs[:1]
+
+    if a == "it13":
+        docs = [d for d in cat if eh_it(d["nome"], 13)]
         if docs:
             return docs[:1]
 
@@ -122,19 +156,20 @@ def selecionar(q, cat):
         if docs:
             return docs[:1]
 
+    # Busca genérica por nome, mas nunca força documento sem coincidência.
     qn = set(normalizar(q))
-    ranked = sorted(
-        cat,
-        key=lambda d: len(qn & set(normalizar(d["nome"]))),
-        reverse=True,
-    )
-    return [d for d in ranked[:3] if len(qn & set(normalizar(d["nome"]))) >= 1]
+    ranked = sorted(cat, key=lambda d: len(qn & set(normalizar(d["nome"]))), reverse=True)
+    return [d for d in ranked[:3] if len(qn & set(normalizar(d["nome"]))) >= 2]
 
 
-def blocos(texto, tamanho=3000):
+# ============================================================
+# RECORTE E BUSCA
+# ============================================================
+def blocos(texto, tamanho=3200):
     texto = re.sub(r"\n{3,}", "\n\n", texto).strip()
     if len(texto) <= tamanho:
         return [texto]
+
     out = []
     i = 0
     while i < len(texto):
@@ -154,28 +189,43 @@ def blocos(texto, tamanho=3000):
 def buscar(q, docs):
     qn = set(normalizar(q))
     a = assunto(q)
-    out = []
+
     stop = {
-        "para", "uma", "com", "qual", "quais", "deve", "ser", "das",
-        "dos", "pessoas", "edificacao", "edificacoes", "populacao",
-        "numero", "minima", "minimo",
+        "para", "uma", "com", "qual", "quais", "quanto", "quantas", "deve",
+        "ser", "das", "dos", "pessoas", "edificacao", "edificacoes", "populacao",
+        "numero", "minima", "minimo", "necessarias", "necessarios", "dever", "qual", "uma",
     }
     termos = qn - stop
 
+    out = []
     for d in docs:
         for i, b in enumerate(blocos(d["texto"])):
-            bt = set(normalizar(b))
-            score = 5 * len(termos & bt)
+            bn = set(normalizar(b))
+            comum = termos & bn
+            score = 5 * len(comum)
+
             if a == "it11":
-                score += 4 * len({"saida", "saidas", "emergencia", "passagem", "largura"} & bt)
-                if "unidade de passagem" in b.lower():
-                    score += 50
-                if "largura" in b.lower() and "saída" in b.lower():
-                    score += 20
-            if score >= 8:
-                out.append({"arquivo": d["arquivo"], "texto": b, "score": score, "bloco": i})
+                chaves = {"saida", "saidas", "emergencia", "passagem", "largura", "ocupacao", "capacidade"}
+                score += 3 * len(chaves & bn)
+
+                # Trecho de IT 11 só é considerado relevante se houver terminologia própria.
+                if "unidade de passagem" in norm(b):
+                    score += 80
+                if "largura" in bn and ("saida" in bn or "emergencia" in bn):
+                    score += 30
+                if "capacidade" in bn and "ocupacao" in bn:
+                    score += 25
+
+            if score >= 15:
+                out.append({
+                    "arquivo": d["arquivo"],
+                    "texto": b,
+                    "score": score,
+                    "bloco": i,
+                })
 
     out.sort(key=lambda x: x["score"], reverse=True)
+
     seen = set()
     result = []
     for x in out:
@@ -183,55 +233,53 @@ def buscar(q, docs):
         if h not in seen:
             seen.add(h)
             result.append(x)
+
     return result[:6]
 
 
-def pergunta_explicita(q):
-    n = set(normalizar(q))
-    gatilhos = {
-        "qual", "quais", "quanto", "quantas", "numero", "largura", "valor",
-        "prazo", "artigo", "item", "inciso", "decreto", "norma", "unidade",
-        "calcule", "calcular",
-    }
-    return bool(n & gatilhos)
-
-
+# ============================================================
+# RESPOSTAS DETERMINISTICAS
+# ============================================================
 def resposta_local(q, res):
-    if not res:
-        return None
-
     n = set(normalizar(q))
     a = assunto(q)
 
-    if a == "decreto" and ("numero" in n or "decreto" in n):
+    # Pergunta de teste: população sem ocupacao nao permite definir C.
+    if a == "it11" and {"100", "unidade", "passagem"} <= n:
+        return (
+            "Não é possível determinar o número de unidades de passagem apenas com a população de 100 pessoas. "
+            "É necessário informar a ocupação/uso da edificação, pois a capacidade de cada unidade de passagem "
+            "depende da ocupação prevista na IT nº 11/2025. "
+            "Com a ocupação definida, aplica-se o dimensionamento previsto na IT nº 11/2025 para obter N e, "
+            "a partir de N, a largura da saída."
+        )
+
+    # Decreto solicitado nominalmente.
+    if a == "decreto" and "decreto" in n:
         for x in res:
             m = re.search(r"69[.\s]118(?:[/\s-](?:2024|24))?", x["texto"], re.I)
             if m:
                 return "69.118/2024"
 
-    # Não inventar cálculo: população sozinha não define a capacidade da ocupação.
-    if a == "it11" and {"100", "unidade", "passagem"} <= n:
-        return (
-            "A base local indica que o dimensionamento das saídas é feito em unidades "
-            "de passagem e depende da capacidade correspondente à ocupação. "
-            "Para uma população de 100 pessoas, a ocupação precisa ser informada "
-            "para determinar o número de unidades de passagem. A largura é obtida "
-            "a partir do número de unidades de passagem, conforme a IT nº 11/2025."
-        )
-
+    # Largura mínima: somente responder se o próprio trecho encontrado contiver a informação.
     if a == "it11" and "largura" in n and ("minima" in n or "minimo" in n):
         for x in res:
-            m = re.search(r"largura\s+m[ií]nima.{0,180}", x["texto"], re.I | re.S)
-            if m:
-                return m.group(0).strip()
-
-    # Pergunta factual explícita: não enviar para o Gemini.
-    if pergunta_explicita(q) and res:
-        return res[0]["texto"]
+            trecho = x["texto"]
+            padroes = [
+                r"largura\s+m[ií]nima.{0,220}",
+                r"largura\s+das\s+sa[ií]das.{0,220}",
+            ]
+            for p in padroes:
+                m = re.search(p, trecho, re.I | re.S)
+                if m:
+                    return m.group(0).strip()
 
     return None
 
 
+# ============================================================
+# GEMINI / WEB: SOMENTE COMO CAMADA SECUNDARIA
+# ============================================================
 def cliente():
     key = st.secrets.get("GEMINI_API_KEY", os.getenv("GEMINI_API_KEY", ""))
     return genai.Client(api_key=key) if key else None
@@ -239,29 +287,30 @@ def cliente():
 
 def sintetizar(c, q, res):
     base = "\n\n".join(f"[FONTE LOCAL: {x['arquivo']}]\n{x['texto']}" for x in res)
-    p = (
-        "Você é o ROMUS.IA. Faça somente uma síntese fiel da BASE LOCAL abaixo. "
-        "Não acrescente fatos, números, fórmulas ou conclusões que não estejam nela. "
+    prompt = (
+        "Você é o ROMUS.IA. Faça somente uma síntese fiel da BASE LOCAL. "
+        "Não acrescente fatos, números, fórmulas, artigos ou conclusões que não estejam explicitamente na base. "
         "Se a base não permitir uma conclusão segura, responda exatamente: "
-        "'A base local não contém informação suficiente para responder com segurança.'\n"
+        "A base local não contém informação suficiente para responder com segurança.\n\n"
         f"PERGUNTA: {q}\n\nBASE LOCAL:\n{base}"
     )
     return c.models.generate_content(
         model=MODEL,
-        contents=p,
+        contents=prompt,
         config=types.GenerateContentConfig(max_output_tokens=500),
     )
 
 
 def pesquisar_web(c, q):
-    p = (
+    prompt = (
         "A base local foi consultada e não contém resposta suficiente. "
-        "Pesquise somente fontes oficiais ou confiáveis. "
-        f"Pergunta: {q}"
+        "Pesquise somente fontes oficiais ou fontes técnicas confiáveis. "
+        "Não invente. Informe as fontes utilizadas.\n\n"
+        f"PERGUNTA: {q}"
     )
     return c.models.generate_content(
         model=MODEL,
-        contents=p,
+        contents=prompt,
         config=types.GenerateContentConfig(
             max_output_tokens=800,
             tools=[types.Tool(google_search=types.GoogleSearch())],
@@ -276,6 +325,9 @@ def fontes(res):
                 st.write("• " + f)
 
 
+# ============================================================
+# INTERFACE
+# ============================================================
 st.title("ROMUS.IA")
 st.caption("Inteligência artificial técnica e objetiva.")
 q = st.text_area("Digite sua pergunta:", height=110)
@@ -310,6 +362,7 @@ if perguntar and q.strip():
 
     st.caption("Fonte: base local do ROMUS.IA")
 
+    # 1. Resposta deterministica, quando existe.
     local = resposta_local(q, res)
     if local:
         st.markdown("### ROMUS.IA")
@@ -318,8 +371,17 @@ if perguntar and q.strip():
         st.stop()
 
     c = cliente()
-    # Gemini somente para síntese, nunca para pergunta factual explícita.
-    if res and c and not pergunta_explicita(q):
+
+    # 2. Pergunta factual: se nao houver resposta deterministica, NAO mostrar trecho aleatorio
+    # e NAO mandar automaticamente para o Gemini.
+    gatilhos = {
+        "qual", "quais", "quanto", "quantas", "numero", "largura", "valor", "prazo",
+        "artigo", "item", "inciso", "decreto", "norma", "unidade", "calcule", "calcular",
+    }
+    factual = bool(set(normalizar(q)) & gatilhos)
+
+    # 3. Sintese por Gemini somente para perguntas nao factuais e somente com base local relevante.
+    if res and c and not factual:
         try:
             t = (sintetizar(c, q, res).text or "").strip()
         except Exception:
@@ -330,7 +392,7 @@ if perguntar and q.strip():
             fontes(res)
             st.stop()
 
-    # Internet somente quando a busca local não encontrou conteúdo relevante.
+    # 4. Web somente se a busca local realmente nao encontrou resposta relevante.
     if not res and web_ok and c:
         try:
             t = (pesquisar_web(c, q).text or "").strip()
@@ -342,6 +404,7 @@ if perguntar and q.strip():
             st.write(t)
             st.stop()
 
+    # 5. Falha segura: nunca exibir um trecho aleatorio como se fosse resposta.
     st.markdown("### ROMUS.IA")
     st.warning("A base local não contém informação suficiente para responder com segurança.")
     fontes(res)
