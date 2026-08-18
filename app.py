@@ -191,7 +191,6 @@ def eh_it(nome, num, ano=2025):
 
 
 def selecionar(q, cat):
-    """Seleção hierárquica: referência normativa > assunto > similaridade mínima."""
     a = assunto(q)
     r = refs(q)
 
@@ -234,7 +233,6 @@ def selecionar(q, cat):
 
 
 def blocos_pagina(paginas, tamanho=3200):
-    """Divide por página para nunca perder a referência da página do PDF."""
     for pagina, texto in paginas:
         texto = re.sub(r"\n{3,}", "\n\n", texto).strip()
         if not texto:
@@ -343,7 +341,6 @@ def buscar(q, docs):
 
 
 def evidencia_suficiente(q, res):
-    """Auditoria determinística antes de qualquer chamada ao Gemini."""
     if not res:
         return 0
 
@@ -506,9 +503,16 @@ if perguntar and q.strip():
         st.stop()
 
     grau = evidencia_suficiente(q, res)
+    tokens = set(normalizar(q))
+    gatilhos_fatuais = {
+        "qual", "quais", "quanto", "quantas", "numero", "largura", "valor",
+        "prazo", "artigo", "item", "inciso", "decreto", "norma", "unidade",
+        "calcule", "calcular", "percentual", "porcentagem",
+    }
+    factual = bool(tokens & gatilhos_fatuais)
 
-    # Gemini só entra quando existe evidência suficiente e a resposta exige síntese.
-    if grau == 2 and res:
+    # Gemini só entra quando há evidência suficiente E a pergunta realmente exige síntese.
+    if grau == 2 and res and not factual:
         c = cliente()
         if c:
             try:
