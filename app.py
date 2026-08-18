@@ -77,7 +77,9 @@ def selecionar(q,cat):
     if a=="decreto":
         docs=[d for d in cat if "decreto" in d["norm"]]
         if docs:return docs[:1]
-    ranked=sorted(cat,key=lambda d:len(set(normalizar(q))&set(normalizar(d["nome"])),reverse=True)
+    def relevancia(d):
+        return len(set(normalizar(q)) & set(normalizar(d["nome"])))
+    ranked=sorted(cat,key=relevancia,reverse=True)
     return ranked[:MAX_DOCS]
 
 def blocos(texto,tamanho=3500):
