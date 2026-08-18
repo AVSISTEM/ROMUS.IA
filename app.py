@@ -17,18 +17,20 @@ ABSTAIN = "A base local não contém informação suficiente para responder com 
 
 RAG_PROMPT = """Você é o ROMUS.IA, assistente técnico de segurança contra incêndio.
 
-Sua única fonte de verdade nesta resposta são as passagens da BASE LOCAL fornecidas abaixo.
+FONTE ÚNICA: use somente a BASE LOCAL fornecida nesta mensagem.
 
-REGRAS OBRIGATÓRIAS:
-1. Responda SOMENTE com informação que esteja nas passagens.
-2. Não complete lacunas com conhecimento próprio.
-3. Não invente números, unidades, artigos, itens, tabelas ou conclusões.
-4. Preserve exatamente números, unidades, datas e referências normativas encontradas.
-5. Se a pergunta pedir um cálculo, só faça o cálculo quando todos os valores necessários estiverem nas passagens.
-6. Não misture documentos diferentes para criar uma regra que não esteja expressamente sustentada.
-7. Se as passagens não permitirem responder com segurança, responda exatamente com a frase de insuficiência.
-8. Para perguntas objetivas, responda primeiro com a resposta objetiva e depois, se necessário, indique o item/página que a sustenta.
-9. Nunca diga que uma informação está na base sem que ela esteja efetivamente nas passagens.
+REGRAS ABSOLUTAS:
+1. Entregue SOMENTE a resposta final. NÃO mostre raciocínio, análise, rascunho, dúvidas, pensamentos ou comentários como "Wait", "Let's look", "preciso verificar" ou equivalentes.
+2. Não use conhecimento próprio ou externo.
+3. Não invente números, unidades, artigos, itens, tabelas, classificações ou conclusões.
+4. Preserve exatamente números, unidades, datas e referências normativas existentes na base.
+5. Se a pergunta informar uma classificação/código (por exemplo, F-11), use SOMENTE a linha/regra correspondente a esse código. NÃO substitua por E-5, E-6 ou qualquer outra classificação.
+6. Se a pergunta trouxer população, faça o cálculo somente se a base fornecer expressamente todos os valores necessários.
+7. Se faltar qualquer informação necessária, responda exatamente: A base local não contém informação suficiente para responder com segurança.
+8. Não misture linhas de tabelas diferentes para fabricar uma resposta.
+9. Se houver tabela, procure primeiro a linha que corresponda exatamente à classificação solicitada e depois a coluna aplicável à pergunta.
+10. Para pergunta objetiva, responda primeiro de forma objetiva e curta. Depois, se necessário, indique documento, item e página.
+11. Nunca cite informação que não esteja efetivamente nas passagens fornecidas.
 
 PERGUNTA:
 {question}
@@ -36,21 +38,23 @@ PERGUNTA:
 BASE LOCAL:
 {context}
 
-RESPOSTA:
+RESPOSTA FINAL:
 """
 
-EXTRACTIVE_PROMPT = """Atue como um extrator rigoroso de informação normativa.
+EXTRACTIVE_PROMPT = """Você é um extrator literal de norma técnica.
 
-Use exclusivamente o texto da BASE LOCAL abaixo. A tarefa é encontrar a resposta para a pergunta, não explicar conhecimento geral.
+Use EXCLUSIVAMENTE a BASE LOCAL abaixo.
 
-REGRAS:
-- Copie literalmente os trechos necessários da base quando eles contiverem a resposta.
-- Preserve números, unidades, sinais, artigos, itens e referências.
-- Se houver uma fórmula ou regra de cálculo na base, reproduza-a e aplique-a somente se todos os valores necessários estiverem presentes.
-- Não invente informação e não use conhecimento externo.
-- Se a resposta não estiver comprovada no texto fornecido, responda exatamente:
+SAÍDA OBRIGATÓRIA:
+- Escreva somente a resposta final em português.
+- Não mostre raciocínio, análise, rascunho, dúvidas ou comentários internos.
+- Não escreva frases como "Wait", "Let's look", "I need", "talvez", "acho que" ou equivalentes.
+- Não reproduza linhas de tabela que não correspondam à classificação perguntada.
+- Se a pergunta contiver uma classificação/código, como F-11, considere somente F-11.
+- Preserve literalmente números, unidades e referências.
+- Faça cálculo somente quando todos os dados necessários estiverem comprovados na base.
+- Se a resposta não estiver comprovada, responda exatamente:
 A base local não contém informação suficiente para responder com segurança.
-- Seja curto e objetivo.
 
 PERGUNTA:
 {question}
@@ -58,14 +62,19 @@ PERGUNTA:
 BASE LOCAL:
 {context}
 
-RESPOSTA:
+RESPOSTA FINAL:
 """
 
 WEB_PROMPT = """A base local foi consultada e não contém evidência suficiente para responder.
 Pesquise somente fontes oficiais ou técnicas confiáveis. Não invente informação.
 Responda diretamente à pergunta e diferencie a informação encontrada na internet da base local."""
 
-STOP = {"para","uma","com","qual","quais","quanto","quantas","deve","ser","das","dos","pessoas","edificacao","edificacoes","populacao","numero","minima","minimo","necessarias","necessarios","conforme","sobre","segundo","como","que","um","o","a","e","de","da","do","na","no"}
+STOP = {
+    "para", "uma", "com", "qual", "quais", "quanto", "quantas", "deve", "ser", "das", "dos",
+    "pessoas", "edificacao", "edificacoes", "populacao", "numero", "minima", "minimo",
+    "necessarias", "necessarios", "conforme", "sobre", "segundo", "como", "que", "um", "o",
+    "a", "e", "de", "da", "do", "na", "no", "grupo"
+}
 
 
 def normalizar(texto):
@@ -82,6 +91,11 @@ def refs(question):
     q = norm(question)
     padrao = r"\bit\s*(?:(?:n|no)\s*)?0?(\d{1,2})\s*[-/ ]\s*(20\d{2}|\d{2})\b"
     return [(int(n), int(a) if len(a) == 4 else 2000 + int(a)) for n, a in re.findall(padrao, q)]
+
+
+def grupos(question):
+    q = norm(question).upper()
+    return set(re.findall(r"\b[A-Z]{1,3}-\d{1,3}\b", q))
 
 
 def eh_it(nome, numero, ano=2025):
@@ -164,6 +178,16 @@ def pagina_score(question, page_text, filename):
     b = set(normalizar(page_text))
     bn = norm(page_text)
     score = 5 * len(q & b)
+
+    # Códigos de ocupação são restrições duras: F-11 não pode ser substituído por E-5/E-6.
+    grupos_q = grupos(question)
+    if grupos_q:
+        grupos_p = grupos(page_text)
+        if grupos_q & grupos_p:
+            score += 500
+        else:
+            score -= 250
+
     for phrase, weight in [
         ("unidade de passagem", 60),
         ("unidades de passagem", 60),
@@ -178,9 +202,11 @@ def pagina_score(question, page_text, filename):
     ]:
         if phrase in bn:
             score += weight
+
     for numero, ano in refs(question):
         if eh_it(filename, numero, ano):
             score += 100
+
     nq = set(re.findall(r"\b\d+(?:[.,]\d+)?\b", norm(question)))
     nb = set(re.findall(r"\b\d+(?:[.,]\d+)?\b", bn))
     score += 8 * len(nq & nb)
@@ -189,25 +215,33 @@ def pagina_score(question, page_text, filename):
 
 def recuperar(question, docs):
     candidatos = []
+    grupos_q = grupos(question)
     for d in docs:
         for pagina, texto in d["paginas"]:
             score = pagina_score(question, texto, d["nome"])
+            if grupos_q and score < 0:
+                continue
             if score > 0:
                 candidatos.append({"arquivo": d["arquivo"], "pagina": pagina, "texto": texto, "score": score})
     candidatos.sort(key=lambda x: x["score"], reverse=True)
 
-    # Não basta pegar páginas isoladas: normas frequentemente quebram uma tabela,
-    # fórmula ou regra entre duas páginas consecutivas. Mantemos as páginas
-    # vizinhas dos melhores resultados para preservar o contexto normativo.
     por_doc = {d["arquivo"]: d for d in docs}
     escolhidos = []
     vistos = set()
+    limite = 6 if grupos_q else 10
+
     for item in candidatos[:6]:
         d = por_doc.get(item["arquivo"])
         if not d:
             continue
-        numeros = [item["pagina"] - 1, item["pagina"], item["pagina"] + 1]
         mapa = {p: t for p, t in d["paginas"]}
+
+        # Para uma classificação explícita, primeiro entrega a página exata.
+        # Só adiciona vizinhas se ainda forem necessárias para completar tabela/regra.
+        numeros = [item["pagina"]]
+        if not grupos_q:
+            numeros += [item["pagina"] - 1, item["pagina"] + 1]
+
         for pagina in numeros:
             if pagina not in mapa:
                 continue
@@ -215,11 +249,17 @@ def recuperar(question, docs):
             if chave in vistos:
                 continue
             vistos.add(chave)
-            escolhidos.append({"arquivo": item["arquivo"], "pagina": pagina, "texto": mapa[pagina], "score": item["score"] if pagina == item["pagina"] else max(1, item["score"] - 5)})
-            if len(escolhidos) >= 10:
+            escolhidos.append({
+                "arquivo": item["arquivo"],
+                "pagina": pagina,
+                "texto": mapa[pagina],
+                "score": item["score"] if pagina == item["pagina"] else max(1, item["score"] - 5),
+            })
+            if len(escolhidos) >= limite:
                 break
-        if len(escolhidos) >= 10:
+        if len(escolhidos) >= limite:
             break
+
     return escolhidos
 
 
@@ -239,30 +279,49 @@ def gerar(c, prompt):
     return c.models.generate_content(
         model=MODEL,
         contents=prompt,
-        config=types.GenerateContentConfig(temperature=0, max_output_tokens=900),
+        config=types.GenerateContentConfig(temperature=0, max_output_tokens=700),
     )
+
+
+def resposta_valida(texto, question=""):
+    texto = (texto or "").strip()
+    if not texto or ABSTAIN in texto:
+        return None
+
+    # Bloqueia vazamento de raciocínio/comentários internos.
+    proibidos = [
+        "wait,", "let's look", "i need to", "let me", "first,", "reasoning:",
+        "analyzing", "vamos analisar", "vou analisar", "preciso verificar", "raciocinio:"
+    ]
+    baixo = texto.lower()
+    if any(x in baixo for x in proibidos):
+        return None
+
+    # A base é brasileira; uma resposta contendo esses marcadores em inglês é rejeitada.
+    if re.search(r"\b(for|wait|let's|look|text|answer)\b", baixo) and re.search(r"\b(e-\d+|f-\d+)\b", baixo):
+        return None
+
+    # Se o usuário perguntou por um código, a resposta não pode introduzir outro código
+    # como se fosse o código solicitado.
+    qgrupos = grupos(question)
+    if qgrupos:
+        outros = set(re.findall(r"\b[A-Z]{1,3}-\d{1,3}\b", texto.upper())) - qgrupos
+        if outros:
+            return None
+
+    return texto
 
 
 def gerar_resposta(c, question, passages):
     ctx = contexto(passages)
+
     primeira = gerar(c, RAG_PROMPT.format(question=question, context=ctx))
-    texto = resposta_valida(primeira.text)
+    texto = resposta_valida(primeira.text, question)
     if texto:
         return texto
 
-    # Segunda passagem deliberadamente extrativa. Não é troca de "personalidade":
-    # é uma validação contra o próprio texto recuperado quando o modelo se abstém.
     segunda = gerar(c, EXTRACTIVE_PROMPT.format(question=question, context=ctx))
-    return resposta_valida(segunda.text)
-
-
-def resposta_valida(texto):
-    texto = (texto or "").strip()
-    if not texto:
-        return None
-    if ABSTAIN in texto:
-        return None
-    return texto
+    return resposta_valida(segunda.text, question)
 
 
 def pesquisar_web(c, question):
