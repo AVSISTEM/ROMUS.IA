@@ -15,7 +15,7 @@ st.title("ROMUS.IA")
 st.caption("Inteligência artificial técnica e objetiva.")
 
 # ==============================================================================
-# 2. CONFIGURAÇÃO DA API DO GEMINI & FILTROS DE SEGURANÇA
+# 2. CONFIGURAÇÃO DA API DO GEMINI
 # ==============================================================================
 api_key = os.getenv("GEMINI_API_KEY") or st.secrets.get("GEMINI_API_KEY", "")
 
@@ -25,7 +25,7 @@ if not api_key:
 
 genai.configure(api_key=api_key)
 
-# Filtros de segurança ajustados para normas técnicas de engenharia de incêndio
+# Configuração de Segurança para evitar bloqueios em termos de incêndio/emergência
 safety_settings = [
     {"category": "HARM_CATEGORY_HARASSMENT", "threshold": "BLOCK_NONE"},
     {"category": "HARM_CATEGORY_HATE_SPEECH", "threshold": "BLOCK_NONE"},
@@ -33,22 +33,11 @@ safety_settings = [
     {"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "BLOCK_NONE"},
 ]
 
-# Função para inicializar o modelo com suporte a fallbacks (evita erro 404)
-def obter_modelo():
-    modelos_para_testar = [
-        "gemini-1.5-flash",
-        "gemini-1.5-pro",
-        "gemini-pro"
-    ]
-    for nome in modelos_para_testar:
-        try:
-            return genai.GenerativeModel(model_name=nome, safety_settings=safety_settings)
-        except Exception:
-            continue
-    # Retorno padrão caso os anteriores falhem
-    return genai.GenerativeModel(model_name="gemini-1.5-flash", safety_settings=safety_settings)
-
-model = obter_modelo()
+# Modelo genérico compatível com a API v1 / v1beta
+model = genai.GenerativeModel(
+    model_name="gemini-pro",
+    safety_settings=safety_settings
+)
 
 # ==============================================================================
 # 3. PROMPT DO SISTEMA (ROMUS.IA)
@@ -92,7 +81,7 @@ def gerar_resposta_romus(pergunta, evidencias, pesquisar_web):
         if response.text and response.text.strip():
             return response.text
         else:
-            return "O mecanismo processou o pedido, mas o conteúdo foi filtrado ou retornou vazio. Tente reformular a pergunta."
+            return "O mecanismo processou o pedido, mas a resposta retornou vazia. Tente reformular a pergunta."
     except Exception as e:
         return f"Erro na comunicação com a IA: {str(e)}"
 
