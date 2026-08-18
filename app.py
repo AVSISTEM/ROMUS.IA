@@ -17,7 +17,6 @@ st.caption("Inteligência artificial técnica e objetiva.")
 # ==============================================================================
 # 2. CONFIGURAÇÃO DA API DO GEMINI & FILTROS DE SEGURANÇA
 # ==============================================================================
-# Certifique-se de configurar a variável GEMINI_API_KEY no secrets do Streamlit
 api_key = os.getenv("GEMINI_API_KEY") or st.secrets.get("GEMINI_API_KEY", "")
 
 if not api_key:
@@ -26,8 +25,7 @@ if not api_key:
 
 genai.configure(api_key=api_key)
 
-# Ajuste nos filtros de segurança para evitar falsos positivos em conteúdos
-# técnicos sobre engenharia de incêndio, saídas de emergência e normas técnicas.
+# Filtros de segurança ajustados para normas técnicas de engenharia de incêndio
 safety_settings = [
     {"category": "HARM_CATEGORY_HARASSMENT", "threshold": "BLOCK_NONE"},
     {"category": "HARM_CATEGORY_HATE_SPEECH", "threshold": "BLOCK_NONE"},
@@ -35,10 +33,22 @@ safety_settings = [
     {"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "BLOCK_NONE"},
 ]
 
-model = genai.GenerativeModel(
-    model_name="gemini-1.5-flash",
-    safety_settings=safety_settings
-)
+# Função para inicializar o modelo com suporte a fallbacks (evita erro 404)
+def obter_modelo():
+    modelos_para_testar = [
+        "gemini-1.5-flash",
+        "gemini-1.5-pro",
+        "gemini-pro"
+    ]
+    for nome in modelos_para_testar:
+        try:
+            return genai.GenerativeModel(model_name=nome, safety_settings=safety_settings)
+        except Exception:
+            continue
+    # Retorno padrão caso os anteriores falhem
+    return genai.GenerativeModel(model_name="gemini-1.5-flash", safety_settings=safety_settings)
+
+model = obter_modelo()
 
 # ==============================================================================
 # 3. PROMPT DO SISTEMA (ROMUS.IA)
@@ -55,12 +65,9 @@ INSTRUÇÕES DE RESPOSTA:
 """
 
 # ==============================================================================
-# 4. FUNÇÃO DE BUSCA NA BASE DE DADOS (INTEGRAÇÃO RAG)
+# 4. FUNÇÃO DE BUSCA NA BASE DE DADOS
 # ==============================================================================
 def buscar_na_base_dados(pergunta):
-    """
-    Substitua esta função pela sua lógica real de busca (Chroma, FAISS, Pinecone, etc.)
-    """
     evidencias_exemplo = [
         "Instrução Técnica / Norma de Saídas de Emergência em Edificações:",
         "- Grupo F-11: Locais de reunião de público / centros de convenções / recintos de exposições.",
@@ -71,7 +78,7 @@ def buscar_na_base_dados(pergunta):
     return "\n".join(evidencias_exemplo)
 
 # ==============================================================================
-# 5. FUNÇÃO DE GERAÇÃO DE RESPOSTA COM TRATAMENTO DE ERROS
+# 5. FUNÇÃO DE GERAÇÃO DE RESPOSTA
 # ==============================================================================
 def gerar_resposta_romus(pergunta, evidencias, pesquisar_web):
     contexto_str = f"EVIDÊNCIAS ENCONTRADAS NA BASE DE DADOS:\n{evidencias}\n\n"
@@ -82,12 +89,10 @@ def gerar_resposta_romus(pergunta, evidencias, pesquisar_web):
 
     try:
         response = model.generate_content(prompt_final)
-
         if response.text and response.text.strip():
             return response.text
         else:
             return "O mecanismo processou o pedido, mas o conteúdo foi filtrado ou retornou vazio. Tente reformular a pergunta."
-
     except Exception as e:
         return f"Erro na comunicação com a IA: {str(e)}"
 
