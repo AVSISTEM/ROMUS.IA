@@ -1,5 +1,6 @@
 import streamlit as st
-import google.generativeai as genai
+from google import genai
+from google.genai import types
 import os
 
 # ==============================================================================
@@ -15,29 +16,16 @@ st.title("ROMUS.IA")
 st.caption("Inteligência artificial técnica e objetiva.")
 
 # ==============================================================================
-# 2. CONFIGURAÇÃO DA API DO GEMINI
+# 2. CONFIGURAÇÃO DA API DO GEMINI (NOVA SDK GOOGLE-GENAI)
 # ==============================================================================
 api_key = os.getenv("GEMINI_API_KEY") or st.secrets.get("GEMINI_API_KEY", "")
 
 if not api_key:
-    st.error("Chave de API (GEMINI_API_KEY) não configurada. Configure em Secrets ou Variáveis de Ambiente.")
+    st.error("Chave de API (GEMINI_API_KEY) não configurada. Configure em Secrets do Streamlit ou Variáveis de Ambiente.")
     st.stop()
 
-genai.configure(api_key=api_key)
-
-# Configuração de Segurança para evitar bloqueios em termos de incêndio/emergência
-safety_settings = [
-    {"category": "HARM_CATEGORY_HARASSMENT", "threshold": "BLOCK_NONE"},
-    {"category": "HARM_CATEGORY_HATE_SPEECH", "threshold": "BLOCK_NONE"},
-    {"category": "HARM_CATEGORY_SEXUALLY_EXPLICIT", "threshold": "BLOCK_NONE"},
-    {"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "BLOCK_NONE"},
-]
-
-# Modelo genérico compatível com a API v1 / v1beta
-model = genai.GenerativeModel(
-    model_name="gemini-pro",
-    safety_settings=safety_settings
-)
+# Inicializa o cliente oficial da nova SDK
+client = genai.Client(api_key=api_key)
 
 # ==============================================================================
 # 3. PROMPT DO SISTEMA (ROMUS.IA)
@@ -67,17 +55,25 @@ def buscar_na_base_dados(pergunta):
     return "\n".join(evidencias_exemplo)
 
 # ==============================================================================
-# 5. FUNÇÃO DE GERAÇÃO DE RESPOSTA
+# 5. FUNÇÃO DE GERAÇÃO DE RESPOSTA (MODELO GEMINI-2.5-FLASH)
 # ==============================================================================
 def gerar_resposta_romus(pergunta, evidencias, pesquisar_web):
     contexto_str = f"EVIDÊNCIAS ENCONTRADAS NA BASE DE DADOS:\n{evidencias}\n\n"
     if pesquisar_web:
         contexto_str += "NOTA: Se as evidências acima forem parciais, utilize também seu conhecimento técnico geral para complementar a resposta com precisão.\n\n"
 
-    prompt_final = f"{SYSTEM_PROMPT}\n\n{contexto_str}PERGUNTA DO USUÁRIO:\n{pergunta}"
+    prompt_final = f"{contexto_str}PERGUNTA DO USUÁRIO:\n{pergunta}"
 
     try:
-        response = model.generate_content(prompt_final)
+        # Chamada usando a nova SDK oficial google-genai
+        response = client.models.generate_content(
+            model="gemini-2.5-flash",
+            contents=prompt_final,
+            config=types.GenerateContentConfig(
+                system_instruction=SYSTEM_PROMPT,
+                temperature=0.2,
+            ),
+        )
         if response.text and response.text.strip():
             return response.text
         else:
