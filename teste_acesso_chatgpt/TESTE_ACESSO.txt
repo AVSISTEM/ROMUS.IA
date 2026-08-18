@@ -1,4 +1,0 @@
-TESTE DE ACESSO DO CHATGPT AO GITHUB
-
-Criado para verificar permissão de escrita no repositório ROMUS.IA.
-Teste realizado em 18/08/2026.
