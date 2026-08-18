@@ -16,7 +16,7 @@ st.title("ROMUS.IA")
 st.caption("Inteligência artificial técnica e objetiva.")
 
 # ==============================================================================
-# 2. CONFIGURAÇÃO DA API DO GEMINI (NOVA SDK GOOGLE-GENAI)
+# 2. CONFIGURAÇÃO DA API DO GEMINI
 # ==============================================================================
 api_key = os.getenv("GEMINI_API_KEY") or st.secrets.get("GEMINI_API_KEY", "")
 
@@ -55,7 +55,7 @@ def buscar_na_base_dados(pergunta):
     return "\n".join(evidencias_exemplo)
 
 # ==============================================================================
-# 5. FUNÇÃO DE GERAÇÃO DE RESPOSTA (MODELO GEMINI-2.5-FLASH)
+# 5. FUNÇÃO DE GERAÇÃO DE RESPOSTA (MODELO GEMINI-3.6-FLASH)
 # ==============================================================================
 def gerar_resposta_romus(pergunta, evidencias, pesquisar_web):
     contexto_str = f"EVIDÊNCIAS ENCONTRADAS NA BASE DE DADOS:\n{evidencias}\n\n"
@@ -65,9 +65,9 @@ def gerar_resposta_romus(pergunta, evidencias, pesquisar_web):
     prompt_final = f"{contexto_str}PERGUNTA DO USUÁRIO:\n{pergunta}"
 
     try:
-        # Chamada usando a nova SDK oficial google-genai
+        # Chamada atualizada com o modelo gemini-3.6-flash
         response = client.models.generate_content(
-            model="gemini-2.5-flash",
+            model="gemini-3.6-flash",
             contents=prompt_final,
             config=types.GenerateContentConfig(
                 system_instruction=SYSTEM_PROMPT,
