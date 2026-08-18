@@ -18,20 +18,20 @@ ABSTAIN = "A base local não contém informação suficiente para responder com 
 
 PROMPT = """Você é o ROMUS.IA, assistente técnico de segurança contra incêndio.
 
-Responda usando SOMENTE o conteúdo existente em <contexto>.
+Use SOMENTE as evidências fornecidas em <contexto> para responder.
 Não use conhecimento externo e não invente informações.
 
-REGRAS:
-- Responda diretamente à pergunta.
-- Se houver tabela, localize primeiro a linha/código exato pedido e depois a coluna correspondente.
-- Se a pergunta mencionar F-11, use somente F-11. Não substitua por E-5, E-6 ou outro grupo.
-- Preserve exatamente números, unidades, datas, itens e referências encontrados no contexto.
-- Faça cálculos somente quando todos os valores necessários estiverem no contexto.
-- Se houver informação suficiente no contexto, responda.
-- Se não houver informação suficiente, responda exatamente: A base local não contém informação suficiente para responder com segurança.
-- Não mostre raciocínio, análise ou comentários internos.
-- Responda em português do Brasil.
-- Informe ao final, de forma curta, o documento e a página utilizados.
+REGRAS OBRIGATÓRIAS:
+1. Responda diretamente à pergunta.
+2. Em tabelas, localize primeiro a linha/código exato solicitado e depois a coluna correspondente.
+3. Se a pergunta mencionar um grupo de ocupação, use somente esse grupo. Não troque F-11 por E-5, E-6 ou outro grupo.
+4. Preserve exatamente números, unidades, itens, datas e referências encontrados nas evidências.
+5. Faça cálculos somente quando todos os valores necessários estiverem nas evidências.
+6. Se as evidências contiverem a resposta, responda. Não diga que falta informação.
+7. Se as evidências realmente não contiverem a resposta, escreva exatamente: A base local não contém informação suficiente para responder com segurança.
+8. Não mostre raciocínio, análise, rascunho ou comentários internos.
+9. Responda sempre em português do Brasil.
+10. Ao final, informe de forma curta o documento e a página utilizados.
 
 <contexto>
 {context}
@@ -41,28 +41,12 @@ REGRAS:
 {question}
 </pergunta>
 
-RESPOSTA:
+RESPOSTA DIRETA:
 """
 
-RETRY_PROMPT = """Responda esta pergunta exclusivamente com base nas evidências fornecidas.
-
-Não explique o processo. Não faça suposições. Não use conhecimento externo.
-Extraia da evidência a informação exata solicitada, inclusive de tabelas.
-Se a pergunta pedir quantidade e largura, informe ambos e faça o cálculo somente se os valores estiverem na evidência.
-Se houver um código de grupo na pergunta, use somente esse código.
-
-EVIDÊNCIAS:
-{context}
-
-PERGUNTA:
-{question}
-
-RESPOSTA DIRETA EM PORTUGUÊS:
-"""
-
-WEB_PROMPT = """Responda à pergunta usando somente fontes oficiais ou técnicas confiáveis encontradas na pesquisa.
+WEB_PROMPT = """Responda à pergunta usando fontes oficiais ou técnicas confiáveis encontradas na Pesquisa Google.
 Não invente informações. Seja objetivo, em português do Brasil.
-Informe as fontes utilizadas."""
+Quando houver norma, decreto ou instrução técnica, dê preferência ao documento oficial e informe as fontes."""
 
 
 def normalizar(texto):
@@ -173,9 +157,8 @@ def escolher_documentos(question, catalogo_docs):
 
 def pontuar_pagina(question, texto):
     q = tokens(question)
-    b = tokens(texto)
-    score = 4 * len(q & b)
     n = normalizar(texto)
+    score = 4 * len(q & tokens(texto))
     frases = {
         "unidade de passagem": 100,
         "unidades de passagem": 100,
@@ -202,7 +185,7 @@ def pontuar_pagina(question, texto):
 
 def trecho_relevante(texto, question):
     linhas = [x.strip() for x in str(texto).splitlines() if x.strip()]
-    if len(linhas) <= 40:
+    if len(linhas) <= 50:
         return "\n".join(linhas)
     grupos_q = grupos(question)
     palavras = tokens(question)
@@ -213,16 +196,19 @@ def trecho_relevante(texto, question):
         relevancia = len(palavras & tokens(linha))
         if grupos_q and grupos_q & gp:
             relevancia += 100
-        if any(p in nl for p in ("unidade de passagem", "largura das saídas", "largura das saidas", "largura mínima", "largura minima", "saída de emergência", "saida de emergencia")):
+        if any(p in nl for p in (
+            "unidade de passagem", "largura das saidas", "largura minima",
+            "dimensionamento das saidas", "saida de emergencia", "largura da saida"
+        )):
             relevancia += 50
         if relevancia > 0:
             indices.append((relevancia, i))
     if not indices:
-        return "\n".join(linhas[:80])
+        return "\n".join(linhas[:100])
     indices.sort(reverse=True)
     escolhidos = set()
-    for _, i in indices[:12]:
-        for j in range(max(0, i - 2), min(len(linhas), i + 4)):
+    for _, i in indices[:15]:
+        for j in range(max(0, i - 3), min(len(linhas), i + 5)):
             escolhidos.add(j)
     return "\n".join(linhas[i] for i in sorted(escolhidos))
 
@@ -237,13 +223,13 @@ def recuperar(question, docs):
     candidatos.sort(key=lambda x: x["score"], reverse=True)
     saida = []
     vistos = set()
-    for item in candidatos[:8]:
+    for item in candidatos:
         chave = (item["arquivo"], item["pagina"])
         if chave in vistos:
             continue
         vistos.add(chave)
         saida.append({**item, "texto": trecho_relevante(item["texto"], question)})
-        if len(saida) >= 6:
+        if len(saida) >= 8:
             break
     return saida
 
@@ -260,20 +246,11 @@ def cliente():
     return genai.Client(api_key=chave) if chave else None
 
 
-def gerar_resposta(c, question, passagens):
+def gerar_local(c, question, passagens):
     resposta = c.models.generate_content(
         model=MODEL,
         contents=PROMPT.format(question=question, context=contexto(passagens)),
-        config=types.GenerateContentConfig(temperature=0, max_output_tokens=700),
-    )
-    return (resposta.text or "").strip()
-
-
-def gerar_resposta_retry(c, question, passagens):
-    resposta = c.models.generate_content(
-        model=MODEL,
-        contents=RETRY_PROMPT.format(question=question, context=contexto(passagens)),
-        config=types.GenerateContentConfig(temperature=0, max_output_tokens=700),
+        config=types.GenerateContentConfig(temperature=0, max_output_tokens=900),
     )
     return (resposta.text or "").strip()
 
@@ -281,38 +258,25 @@ def gerar_resposta_retry(c, question, passagens):
 def validar(texto, question):
     if not texto or ABSTAIN in texto:
         return None
+    baixo = texto.lower()
     proibidos = (
         "wait,", "let's look", "i need to", "let me", "reasoning:",
         "analyzing", "vamos analisar", "vou analisar", "preciso verificar",
         "raciocínio:", "raciocinio:"
     )
-    baixo = texto.lower()
     if any(x in baixo for x in proibidos):
         return None
+
+    # Não exigir que o modelo repita o código do grupo na resposta.
+    # Isso causava falso negativo em respostas corretas como:
+    # "São necessárias 2 unidades de passagem...".
     grupos_q = grupos(question)
-    if grupos_q and not grupos_q.issubset(grupos(texto)):
-        return None
-    if grupos_q and (grupos(texto) - grupos_q):
-        return None
+    if grupos_q:
+        grupos_resposta = grupos(texto)
+        grupos_contraditorios = grupos_resposta - grupos_q
+        if grupos_contraditorios:
+            return None
     return texto
-
-
-def responder_local(c, question, passagens):
-    if not c or not passagens:
-        return None
-    try:
-        primeira = validar(gerar_resposta(c, question, passagens), question)
-        if primeira:
-            return primeira
-    except Exception:
-        pass
-    try:
-        segunda = validar(gerar_resposta_retry(c, question, passagens), question)
-        if segunda:
-            return segunda
-    except Exception:
-        pass
-    return None
 
 
 def pesquisar_web(c, question):
@@ -321,7 +285,7 @@ def pesquisar_web(c, question):
         contents=WEB_PROMPT + "\n\nPERGUNTA:\n" + question,
         config=types.GenerateContentConfig(
             temperature=0,
-            max_output_tokens=800,
+            max_output_tokens=900,
             tools=[types.Tool(google_search=types.GoogleSearch())],
         ),
     )
@@ -366,38 +330,50 @@ if perguntar and question.strip():
     with st.spinner("Localizando as páginas relevantes..."):
         passagens = recuperar(question, docs)
 
+    st.markdown("### ROMUS.IA")
     c = cliente()
-    resposta = None
+    resposta_local = None
+    erro_local = None
 
     if c and passagens:
         with st.spinner("Consultando a evidência local..."):
-            resposta = responder_local(c, question, passagens)
+            try:
+                resposta_local = validar(gerar_local(c, question, passagens), question)
+            except Exception as e:
+                erro_local = str(e)
 
-    st.markdown("### ROMUS.IA")
-
-    if resposta:
+    if resposta_local:
         st.caption("Fonte: base local do ROMUS.IA")
-        st.write(resposta)
+        st.write(resposta_local)
         mostrar_fontes(passagens)
         st.stop()
 
-    # Se a base foi encontrada mas o Gemini local falhou, o fallback web
-    # também deve funcionar. O código anterior só fazia isso quando
-    # passagens == [] e produzia um falso aviso de base insuficiente.
     if web_ok and c:
-        with st.spinner("Base local não respondeu. Consultando fontes técnicas na web..."):
+        with st.spinner("Base local não produziu resposta. Consultando fontes técnicas na web..."):
             try:
                 web_text = pesquisar_web(c, question)
-            except Exception:
+            except Exception as e:
                 web_text = ""
+                erro_web = str(e)
+            else:
+                erro_web = None
         if web_text:
-            st.caption("Fonte: pesquisa na internet — resposta local indisponível")
+            st.caption("Fonte: pesquisa na internet — base local sem resposta válida")
             st.write(web_text)
             mostrar_fontes(passagens)
             st.stop()
+    else:
+        erro_web = None
+
+    if erro_local or erro_web:
+        with st.expander("Diagnóstico técnico"):
+            if erro_local:
+                st.code("LOCAL: " + erro_local)
+            if erro_web:
+                st.code("WEB: " + erro_web)
 
     if passagens:
-        st.error("A evidência foi localizada, mas não foi possível gerar uma resposta válida.")
+        st.error("A evidência foi localizada, mas o mecanismo de resposta não conseguiu gerar uma resposta válida.")
     else:
         st.warning(ABSTAIN)
     mostrar_fontes(passagens)
