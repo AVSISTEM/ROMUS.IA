@@ -1,3 +1,5 @@
+import hashlib
+import os
 import re
 from pathlib import Path
 
@@ -11,9 +13,9 @@ st.set_page_config(page_title="ROMUS.IA", page_icon="🔥", layout="centered")
 BASE_DIR = Path(__file__).parent
 KNOWLEDGE_DIR = BASE_DIR / "base_conhecimento"
 
-# Gemini NÃO participa da busca local. Só é chamado quando a base encontrou
-# material, mas a resposta realmente exige síntese.
-MODEL = "gemini-3.5-flash-lite"
+# Modelo atual. Gemini só entra depois da busca local e somente quando
+# a resposta não puder ser extraída diretamente.
+MODEL = "gemini-3.6-flash"
 MAX_DOCUMENTOS = 5
 MAX_BLOCOS = 8
 MIN_SCORE = 2
@@ -41,19 +43,38 @@ def texto_normalizado(texto: str) -> str:
     return " ".join(normalizar(texto))
 
 
+def arquivo_signature() -> tuple:
+    """Assinatura barata dos arquivos. Permite recarregar a base quando ela muda."""
+    KNOWLEDGE_DIR.mkdir(parents=True, exist_ok=True)
+    itens = []
+    for caminho in sorted(KNOWLEDGE_DIR.rglob("*")):
+        if caminho.is_file() and caminho.suffix.lower() in {".txt", ".md", ".pdf"}:
+            try:
+                stat = caminho.stat()
+                itens.append((caminho.relative_to(KNOWLEDGE_DIR).as_posix(), stat.st_size, stat.st_mtime_ns))
+            except OSError:
+                pass
+    return tuple(itens)
+
+
 def ler_arquivo(caminho: Path) -> str:
     if caminho.suffix.lower() in {".txt", ".md"}:
         return caminho.read_text(encoding="utf-8", errors="ignore")
     if caminho.suffix.lower() == ".pdf":
         reader = PdfReader(str(caminho))
-        return "\n".join((pagina.extract_text() or "") for pagina in reader.pages)
+        paginas = []
+        for pagina in reader.pages:
+            paginas.append(pagina.extract_text() or "")
+        return "\n".join(paginas)
     return ""
 
 
-def carregar_documentos() -> list[dict]:
-    KNOWLEDGE_DIR.mkdir(parents=True, exist_ok=True)
+@st.cache_data(show_spinner=False)
+def carregar_documentos(signature: tuple) -> list[dict]:
+    """Lê cada PDF uma única vez por versão da base."""
+    del signature
     documentos = []
-    vistos = set()
+    hashes = set()
 
     for caminho in sorted(KNOWLEDGE_DIR.rglob("*")):
         if not caminho.is_file() or caminho.suffix.lower() not in {".txt", ".md", ".pdf"}:
@@ -65,17 +86,26 @@ def carregar_documentos() -> list[dict]:
         if not texto:
             continue
 
-        relativo = caminho.relative_to(KNOWLEDGE_DIR).as_posix()
-        chave = (relativo.lower(), len(texto))
-        if chave in vistos:
+        # Duplicidade real: mesmo conteúdo, mesmo que o nome do PDF seja diferente.
+        digest = hashlib.sha256(texto.encode("utf-8", errors="ignore")).hexdigest()
+        if digest in hashes:
             continue
-        vistos.add(chave)
-        documentos.append({"arquivo": relativo, "nome": caminho.name, "texto": texto})
+        hashes.add(digest)
+
+        relativo = caminho.relative_to(KNOWLEDGE_DIR).as_posix()
+        documentos.append({
+            "arquivo": relativo,
+            "nome": caminho.name,
+            "texto": texto,
+            "texto_norm": texto_normalizado(texto[:30000]),
+            "nome_norm": texto_normalizado(caminho.name),
+            "hash": digest,
+        })
 
     return documentos
 
 
-def dividir_em_blocos(texto: str, tamanho: int = 2200, sobreposicao: int = 250) -> list[str]:
+def dividir_em_blocos(texto: str, tamanho: int = 2400, sobreposicao: int = 180) -> list[str]:
     texto = re.sub(r"\n{3,}", "\n\n", texto).strip()
     if len(texto) <= tamanho:
         return [texto]
@@ -97,37 +127,31 @@ def dividir_em_blocos(texto: str, tamanho: int = 2200, sobreposicao: int = 250) 
 
 
 @st.cache_data(show_spinner=False)
-def construir_indice() -> list[dict]:
+def construir_indice(signature: tuple) -> list[dict]:
+    documentos = carregar_documentos(signature)
     indice = []
-    for documento in carregar_documentos():
+    for documento in documentos:
         for numero, bloco in enumerate(dividir_em_blocos(documento["texto"])):
             indice.append({
                 "arquivo": documento["arquivo"],
+                "nome": documento["nome"],
                 "texto": bloco,
+                "texto_norm": texto_normalizado(bloco),
                 "termos": set(normalizar(bloco)),
                 "numero_bloco": numero,
+                "hash": documento["hash"],
             })
     return indice
-
-
-def remover_duplicados_itens(itens: list[dict]) -> list[dict]:
-    resultado = []
-    vistos = set()
-    for item in itens:
-        chave = (item["arquivo"].lower(), re.sub(r"\s+", " ", item["texto"]).strip().lower())
-        if chave in vistos:
-            continue
-        vistos.add(chave)
-        resultado.append(item)
-    return resultado
 
 
 def extrair_referencias(pergunta: str) -> dict:
     q = pergunta.lower()
     referencias = {"it": [], "item": [], "decreto": [], "ano": []}
 
-    for numero in re.findall(r"\bit\s*(?:n[ºo°]?\s*)?(\d{1,2})\s*[-/]\s*(20\d{2})\b", q):
-        referencias["it"].append((int(numero[0]), int(numero[1])))
+    for numero, ano in re.findall(r"\bit\s*(?:n[ºo°]?\s*)?(\d{1,2})\s*[-/]\s*(20\d{2})\b", q):
+        par = (int(numero), int(ano))
+        if par not in referencias["it"]:
+            referencias["it"].append(par)
 
     for numero in re.findall(r"\bit\s*(?:n[ºo°]?\s*)?(\d{1,2})\s*[-/]\s*25\b", q):
         par = (int(numero), 2025)
@@ -140,43 +164,60 @@ def extrair_referencias(pergunta: str) -> dict:
     return referencias
 
 
-def score_documento(pergunta: str, documento: dict) -> int:
+def intencao_documental(pergunta: str) -> str:
     q = texto_normalizado(pergunta)
-    termos = set(normalizar(pergunta))
-    nome = texto_normalizado(documento["nome"])
-    texto_inicio = texto_normalizado(documento["texto"][:12000])
-    score = 0
-    refs = extrair_referencias(pergunta)
+    if "decreto" in q:
+        return "decreto"
+    if re.search(r"\bit\b", q):
+        return "it"
+    return "geral"
 
+
+def score_documento(pergunta: str, documento: dict) -> int:
+    termos = set(normalizar(pergunta))
+    nome = documento["nome_norm"]
+    texto_inicio = documento["texto_norm"][:14000]
+    refs = extrair_referencias(pergunta)
+    score = 0
+    intencao = intencao_documental(pergunta)
+
+    # Referência normativa explícita tem prioridade absoluta.
     for numero, ano in refs["it"]:
-        padrao = rf"\bit\s*0?{numero}\s*[-/]\s*{ano}\b"
-        if re.search(padrao, nome, flags=re.I):
-            score += 100
+        if re.search(rf"\bit\s*0?{numero}\s*[-/]\s*{ano}\b", nome, flags=re.I):
+            score += 500
         elif f"it {numero} 25" in nome or f"it 0{numero} 25" in nome:
-            score += 90
+            score += 450
 
     for decreto in refs["decreto"]:
-        if decreto.replace(".", "").replace("/", "").replace("-", "") in re.sub(r"[./-]", "", nome):
-            score += 100
+        limpo = re.sub(r"[./-]", "", decreto)
+        if limpo and limpo in re.sub(r"[./-]", "", nome):
+            score += 500
+
+    # Pergunta sobre decreto sem número: arquivo do decreto vence ITs de terminologia.
+    if intencao == "decreto" and "decreto" in nome:
+        score += 350
+
+    if intencao == "it" and "it " in nome:
+        score += 40
 
     nome_termos = set(normalizar(documento["nome"]))
-    score += 6 * len(termos.intersection(nome_termos))
-    score += len(termos.intersection(set(normalizar(documento["texto"][:12000]))))
+    score += 8 * len(termos.intersection(nome_termos))
 
-    if q and len(q) >= 12 and q in texto_inicio:
-        score += 80
+    # Termos relevantes no começo do documento ajudam sem deixar um documento
+    # genérico ganhar apenas porque é grande.
+    score += 2 * len(termos.intersection(set(normalizar(documento["texto"][:12000]))))
+
     return score
 
 
-def selecionar_documentos(pergunta: str) -> list[dict]:
-    documentos = carregar_documentos()
+def selecionar_documentos(pergunta: str, documentos: list[dict]) -> list[dict]:
     avaliados = []
     for documento in documentos:
         score = score_documento(pergunta, documento)
         if score >= MIN_SCORE:
             avaliados.append({**documento, "score_documento": score})
 
-    avaliados.sort(key=lambda x: (x["score_documento"], len(x["texto"])), reverse=True)
+    avaliados.sort(key=lambda x: (x["score_documento"], -len(x["texto"])), reverse=True)
     refs = extrair_referencias(pergunta)
 
     if refs["it"]:
@@ -187,60 +228,83 @@ def selecionar_documentos(pergunta: str) -> list[dict]:
         if fortes:
             return fortes[:MAX_DOCUMENTOS]
 
+    if intencao_documental(pergunta) == "decreto":
+        decretos = [d for d in avaliados if "decreto" in d["nome_norm"]]
+        if decretos:
+            return decretos[:MAX_DOCUMENTOS]
+
     return avaliados[:MAX_DOCUMENTOS]
 
 
 def score_bloco(pergunta: str, bloco: dict, documento_score: int = 0) -> int:
     termos = set(normalizar(pergunta))
-    texto = bloco["texto"]
-    bloco_termos = set(normalizar(texto))
+    bloco_termos = bloco["termos"]
     score = documento_score // 10
     score += 3 * len(termos.intersection(bloco_termos))
+    nt = bloco["texto_norm"]
     q = texto_normalizado(pergunta)
-    nt = texto_normalizado(texto)
 
     if q and len(q) >= 12 and q in nt:
-        score += 100
+        score += 180
 
     palavras = normalizar(pergunta)
     for tamanho in (5, 4, 3):
         for i in range(max(0, len(palavras) - tamanho + 1)):
             trecho = " ".join(palavras[i:i + tamanho])
             if trecho and trecho in nt:
-                score += tamanho * 8
+                score += tamanho * 10
     return score
 
 
-def buscar_base(pergunta: str) -> list[dict]:
-    documentos = selecionar_documentos(pergunta)
-    if not documentos:
+def buscar_base(pergunta: str, indice: list[dict], documentos: list[dict]) -> list[dict]:
+    selecionados = selecionar_documentos(pergunta, documentos)
+    if not selecionados:
         return []
 
-    indice = construir_indice()
-    nomes_prioritarios = {d["arquivo"]: d for d in documentos}
+    prioritarios = {d["arquivo"]: d for d in selecionados}
     resultados = []
-
-    for item in indice:
-        if item["arquivo"] not in nomes_prioritarios:
+    for bloco in indice:
+        if bloco["arquivo"] not in prioritarios:
             continue
-        doc = nomes_prioritarios[item["arquivo"]]
-        score = score_bloco(pergunta, item, doc["score_documento"])
+        doc = prioritarios[bloco["arquivo"]]
+        score = score_bloco(pergunta, bloco, doc["score_documento"])
         if score >= MIN_SCORE:
-            resultados.append({**item, "score": score})
+            resultados.append({**bloco, "score": score})
 
     resultados.sort(key=lambda x: x["score"], reverse=True)
-    resultados = remover_duplicados_itens(resultados)
 
-    # Impede que muitos blocos do mesmo documento dominem a resposta.
+    # Remove blocos idênticos e, principalmente, não apresenta o mesmo documento
+    # várias vezes na interface.
+    vistos_conteudo = set()
+    unicos = []
+    for item in resultados:
+        chave = hashlib.sha1(re.sub(r"\s+", " ", item["texto"]).strip().lower().encode("utf-8", errors="ignore")).hexdigest()
+        if chave in vistos_conteudo:
+            continue
+        vistos_conteudo.add(chave)
+        unicos.append(item)
+
     finais = []
     por_documento = {}
-    for item in resultados:
+    for item in unicos:
         quantidade = por_documento.get(item["arquivo"], 0)
-        if quantidade >= MAX_BLOCOS:
+        if quantidade >= 3:
             continue
         por_documento[item["arquivo"]] = quantidade + 1
         finais.append(item)
-    return finais[:MAX_BLOCOS]
+        if len(finais) >= MAX_BLOCOS:
+            break
+    return finais
+
+
+def pedido_literal(pergunta: str) -> bool:
+    termos = set(normalizar(pergunta))
+    return bool(termos.intersection({"transcreva", "transcrever", "literalmente", "literal", "exatamente", "exato", "redação"}))
+
+
+def pergunta_pede_calculo(pergunta: str) -> bool:
+    termos = set(normalizar(pergunta))
+    return bool(termos.intersection({"calcule", "calcular", "cálculo", "calculo", "dimensione", "dimensionar"}))
 
 
 def extrair_numero_item(pergunta: str) -> str | None:
@@ -261,89 +325,89 @@ def extrair_item_literal(texto: str, numero_item: str) -> str | None:
     return None
 
 
-def localizar_documento_para_item(pergunta: str) -> dict | None:
-    candidatos = selecionar_documentos(pergunta)
-    numero_item = extrair_numero_item(pergunta)
-    if numero_item:
-        for doc in candidatos:
-            if extrair_item_literal(doc["texto"], numero_item):
-                return doc
-    return candidatos[0] if candidatos else None
-
-
-def pedido_literal(pergunta: str) -> bool:
-    termos = set(normalizar(pergunta))
-    return bool(termos.intersection({"transcreva", "transcrever", "literalmente", "literal", "exatamente", "exato", "texto", "redação"}))
-
-
-def pergunta_pede_calculo(pergunta: str) -> bool:
-    termos = set(normalizar(pergunta))
-    return bool(termos.intersection({"calcule", "calcular", "cálculo", "calculo", "dimensione", "dimensionar"}))
-
-
-def extrair_resposta_explicita(pergunta: str, resultados: list[dict]) -> str | None:
-    """Responde diretamente quando a informação está explícita na base, sem Gemini."""
+def melhor_linha_explicita(pergunta: str, resultados: list[dict]) -> str | None:
+    """Extrai uma resposta objetiva da própria base, sem modelo generativo."""
     if not resultados:
         return None
 
+    q = texto_normalizado(pergunta)
     termos = set(normalizar(pergunta))
+    intencao = intencao_documental(pergunta)
+    refs = extrair_referencias(pergunta)
     candidatos = []
     vistos = set()
 
+    # Para perguntas sobre decreto, primeiro procurar linhas que realmente tratem
+    # do decreto, e não qualquer linha de uma IT que mencione segurança contra incêndio.
+    if intencao == "decreto":
+        palavras_prioritarias = {"decreto", "regulamento", "institui", "seguranca", "incendio"}
+    elif refs["it"]:
+        palavras_prioritarias = {"saidas", "emergencia", "largura", "unidade", "passagem", "porta", "minima", "minimo"}
+    else:
+        palavras_prioritarias = termos
+
     for item in resultados:
-        for linha in item["texto"].splitlines():
-            linha = re.sub(r"\s+", " ", linha).strip()
-            if len(linha) < 12:
+        linhas = re.split(r"\n+", item["texto"])
+        for linha in linhas:
+            linha = re.sub(r"\s+", " ", linha).strip(" -\t")
+            if len(linha) < 15:
                 continue
             chave = linha.lower()
             if chave in vistos:
                 continue
             vistos.add(chave)
 
-            linha_termos = set(normalizar(linha))
-            coincidencias = len(termos.intersection(linha_termos))
-            if coincidencias == 0:
-                continue
+            lt = set(normalizar(linha))
+            coincidencias = len(termos.intersection(lt))
+            prioridades = len(palavras_prioritarias.intersection(lt))
+            score = item["score"] + coincidencias * 4 + prioridades * 7
 
-            bonus = 0
             if re.search(r"\d", linha):
-                bonus += 4
-            if re.search(r"\b(item|it|decreto|largura|mínim|minim|altura|número|unidades|pessoas)\b", linha.lower()):
-                bonus += 3
+                score += 5
+            if intencao == "decreto" and "decreto" in lt:
+                score += 80
+            if refs["it"] and ("largura" in lt or "saida" in lt or "emergencia" in lt):
+                score += 35
+            if q and q in texto_normalizado(linha):
+                score += 100
 
-            score = coincidencias * 3 + bonus + item["score"]
-            candidatos.append((score, linha))
+            if prioridades >= 1 or coincidencias >= 2:
+                candidatos.append((score, linha))
 
     candidatos.sort(key=lambda x: x[0], reverse=True)
     if not candidatos:
         return None
 
+    # Evita retornar lixo de cabeçalho só porque contém muitas palavras comuns.
     melhor_score, melhor = candidatos[0]
-    if melhor_score >= 14:
-        return melhor
-
-    fortes = [linha for score, linha in candidatos[:3] if score >= 10]
-    if fortes:
-        return "\n".join(dict.fromkeys(fortes))
-    return None
+    if melhor_score < 30:
+        return None
+    return melhor
 
 
-def responder_local_sem_gemini(pergunta: str, resultados: list[dict]) -> str | None:
-    # Pedido literal: extração direta do PDF.
+def resposta_local_deterministica(pergunta: str, resultados: list[dict]) -> str | None:
+    if not resultados:
+        return None
+
     if pedido_literal(pergunta):
         numero = extrair_numero_item(pergunta)
         if numero:
-            doc = localizar_documento_para_item(pergunta)
-            if doc:
-                trecho = extrair_item_literal(doc["texto"], numero)
+            for item in resultados:
+                trecho = extrair_item_literal(item["texto"], numero)
                 if trecho:
                     return trecho
 
-    # Informação explícita: não chama Gemini.
-    explicita = extrair_resposta_explicita(pergunta, resultados)
-    if explicita and not pergunta_pede_calculo(pergunta):
-        return explicita
+    if not pergunta_pede_calculo(pergunta):
+        return melhor_linha_explicita(pergunta, resultados)
+
     return None
+
+
+def obter_client():
+    chave = st.secrets.get("GEMINI_API_KEY", os.getenv("GEMINI_API_KEY", ""))
+    if not chave:
+        return None
+    return genai.Client(api_key=chave)
 
 
 def gerar_resposta_local(client, pergunta: str, resultados: list[dict]):
@@ -357,8 +421,8 @@ Use exclusivamente o conteúdo abaixo.
 Não pesquise na internet.
 Não acrescente conhecimento externo.
 Se o conteúdo não permitir responder com segurança, responda somente {LIMITE_INSUFICIENTE}.
-Quando houver cálculo solicitado, use somente os critérios, fórmulas e números presentes na base.
-Quando houver mais de uma regra, indique claramente de qual trecho vem cada uma.
+Quando houver cálculo solicitado, use somente critérios, fórmulas e números presentes na base.
+Quando houver mais de uma regra, indique claramente de qual fonte vem cada uma.
 
 CONTEÚDO DA BASE:
 {contexto}
@@ -366,131 +430,110 @@ CONTEÚDO DA BASE:
 PERGUNTA:
 {pergunta}
 """
-    return client.models.generate_content(model=MODEL, contents=prompt)
+    return client.models.generate_content(
+        model=MODEL,
+        contents=prompt,
+        config=types.GenerateContentConfig(temperature=0, max_output_tokens=700),
+    )
 
 
 def gerar_resposta_web(client, pergunta: str):
     prompt = f"""
 {SYSTEM_PROMPT}
 
-MODO: PESQUISA NA INTERNET.
-A base local foi consultada e não apresentou conteúdo suficiente.
-Pesquise na web e priorize fontes oficiais e primárias.
-Informe claramente que a resposta veio de pesquisa externa.
+A base documental local foi consultada e não contém informação suficiente para responder com segurança.
+Agora faça pesquisa na internet usando somente fontes confiáveis, dando prioridade a legislação, órgãos públicos e fontes oficiais.
+Deixe explícito que a resposta veio da pesquisa externa.
 
 PERGUNTA:
 {pergunta}
 """
-    ferramenta = types.Tool(google_search=types.GoogleSearch())
-    return client.models.generate_content(model=MODEL, contents=prompt, config=types.GenerateContentConfig(tools=[ferramenta]))
+    config = types.GenerateContentConfig(
+        temperature=0,
+        max_output_tokens=800,
+        tools=[types.Tool(google_search=types.GoogleSearch())],
+    )
+    return client.models.generate_content(model=MODEL, contents=prompt, config=config)
 
 
-def erro_api(ex: Exception) -> bool:
-    texto = str(ex).upper()
-    return any(x in texto for x in ("429", "404", "RESOURCE_EXHAUSTED", "QUOTA", "NOT_FOUND"))
-
-
-def mostrar_fontes_web(resposta):
-    try:
-        metadata = resposta.candidates[0].grounding_metadata
-        fontes = getattr(metadata, "grounding_chunks", None) or []
-        urls = []
-        for fonte in fontes:
-            web = getattr(fonte, "web", None)
-            if web and getattr(web, "uri", None) and web.uri not in [u[1] for u in urls]:
-                urls.append((getattr(web, "title", None) or web.uri, web.uri))
-        if urls:
-            st.markdown("### Fontes consultadas")
-            for titulo, url in urls[:8]:
-                st.markdown(f"- [{titulo}]({url})")
-    except Exception:
-        pass
-
-
-def mostrar_resultados(resultados: list[dict]):
-    with st.expander("Documentos encontrados na base"):
-        vistos = set()
-        for item in resultados:
-            if item["arquivo"] in vistos:
-                continue
-            vistos.add(item["arquivo"])
-            st.write(f"**{item['arquivo']}** — relevância {item['score']}")
-
-
-def mostrar_fallback_local(pergunta: str, resultados: list[dict]):
-    resposta = responder_local_sem_gemini(pergunta, resultados)
-    if resposta:
-        st.markdown("### ROMUS.IA")
-        st.write(resposta)
-        mostrar_resultados(resultados)
-    else:
-        st.info("A base encontrou conteúdo relacionado, mas a resposta exige síntese ou cálculo. O Gemini está indisponível no momento; nenhuma informação externa foi inventada.")
-        mostrar_resultados(resultados)
+def mostrar_fontes(resultados: list[dict]):
+    vistos = set()
+    fontes = []
+    for item in resultados:
+        if item["arquivo"] in vistos:
+            continue
+        vistos.add(item["arquivo"])
+        fontes.append(item["arquivo"])
+    if fontes:
+        with st.expander("Documentos encontrados na base"):
+            for fonte in fontes:
+                st.write(f"• {fonte}")
 
 
 st.title("ROMUS.IA")
-st.subheader("Inteligência artificial técnica e objetiva.")
-pergunta = st.text_area("Digite sua pergunta:", placeholder="Pergunte qualquer coisa...", height=120)
+st.caption("Inteligência artificial técnica e objetiva.")
 
-col1, col2 = st.columns(2)
+pergunta = st.text_area("Digite sua pergunta:", height=110)
+web_habilitada = st.checkbox("Pesquisar na web se a base não responder", value=True)
+
+col1, col2 = st.columns([1, 1])
 with col1:
-    pesquisar_web_se_necessario = st.checkbox("Pesquisar na web se a base não responder", value=True)
+    perguntar = st.button("Perguntar", type="primary")
 with col2:
-    if st.button("Recarregar base"):
-        st.cache_data.clear()
-        st.rerun()
+    recarregar = st.button("Recarregar base")
 
-if st.button("Perguntar", type="primary"):
-    if not pergunta.strip():
-        st.warning("Digite uma pergunta.")
-    else:
-        # 1. BASE LOCAL — não depende do Gemini.
-        resultados = buscar_base(pergunta)
+if recarregar:
+    st.cache_data.clear()
+    st.rerun()
 
-        if resultados:
-            st.caption("Fonte: base local do ROMUS.IA")
+if perguntar and pergunta.strip():
+    assinatura = arquivo_signature()
+    with st.spinner("Consultando a base local..."):
+        documentos = carregar_documentos(assinatura)
+        indice = construir_indice(assinatura)
+        resultados = buscar_base(pergunta.strip(), indice, documentos)
 
-            # 2. RESPOSTA DIRETA — literal ou explícita, zero Gemini.
-            direta = responder_local_sem_gemini(pergunta, resultados)
-            if direta:
-                st.markdown("### ROMUS.IA")
-                st.write(direta)
-                mostrar_resultados(resultados)
-                st.stop()
+    st.caption("Fonte: base local do ROMUS.IA")
 
-            # 3. SÍNTESE — Gemini só quando realmente necessária.
+    # CAMADA 1: resposta direta, sem Gemini.
+    resposta_direta = resposta_local_deterministica(pergunta.strip(), resultados)
+    if resposta_direta:
+        st.markdown("### ROMUS.IA")
+        st.write(resposta_direta)
+        mostrar_fontes(resultados)
+        st.stop()
+
+    # CAMADA 2: Gemini somente quando a pergunta exige síntese/cálculo.
+    client = obter_client()
+    if resultados and client is not None:
+        with st.spinner("Sintetizando a resposta com base no documento..."):
             try:
-                client = genai.Client(api_key=st.secrets["GEMINI_API_KEY"])
-                resposta = gerar_resposta_local(client, pergunta, resultados)
-                texto = resposta.text or ""
-                if LIMITE_INSUFICIENTE not in texto:
-                    st.markdown("### ROMUS.IA")
-                    st.write(texto)
-                    mostrar_resultados(resultados)
-                    st.stop()
-            except Exception as ex:
-                if not erro_api(ex):
-                    st.error(f"Erro no mecanismo de síntese: {ex}")
-                    st.stop()
+                resposta = gerar_resposta_local(client, pergunta.strip(), resultados)
+                texto = (resposta.text or "").strip()
+            except Exception as exc:
+                texto = f"ERRO_GEMINI: {exc}"
 
-            # Gemini indisponível: a base continua sendo utilizada.
-            st.warning("Gemini indisponível ou sem cota. O ROMUS continua consultando a base local.")
-            mostrar_fallback_local(pergunta, resultados)
+        if texto and texto != LIMITE_INSUFICIENTE and not texto.startswith("ERRO_GEMINI:"):
+            st.markdown("### ROMUS.IA")
+            st.write(texto)
+            mostrar_fontes(resultados)
             st.stop()
 
-        # 4. WEB — só chega aqui quando a base realmente não encontrou conteúdo.
-        if pesquisar_web_se_necessario:
-            st.caption("Fonte: pesquisa na internet — base local sem conteúdo suficiente")
+    # CAMADA 3: internet somente quando a base não foi suficiente.
+    if web_habilitada and client is not None:
+        with st.spinner("A base não foi suficiente. Pesquisando na internet..."):
             try:
-                client = genai.Client(api_key=st.secrets["GEMINI_API_KEY"])
-                resposta = gerar_resposta_web(client, pergunta)
-                st.markdown("### ROMUS.IA")
-                st.write(resposta.text)
-                mostrar_fontes_web(resposta)
-            except Exception as ex:
-                if erro_api(ex):
-                    st.error("A base local não encontrou conteúdo suficiente e a API Gemini está indisponível ou sem cota para realizar a pesquisa web.")
-                else:
-                    st.error(f"Erro na pesquisa web: {ex}")
-        else:
-            st.info("A base local não contém informação suficiente e a pesquisa na web está desativada.")
+                resposta = gerar_resposta_web(client, pergunta.strip())
+                texto = (resposta.text or "").strip()
+            except Exception as exc:
+                texto = f"ERRO_WEB: {exc}"
+        if texto:
+            st.caption("Fonte: pesquisa na internet (base local insuficiente)")
+            st.markdown("### ROMUS.IA")
+            st.write(texto)
+            mostrar_fontes(resultados)
+            st.stop()
+
+    st.markdown("### ROMUS.IA")
+    st.warning("A base local não contém informação suficiente para responder com segurança.")
+    mostrar_fontes(resultados)
