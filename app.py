@@ -4,7 +4,14 @@ import time
 import streamlit as st
 from google import genai
 from google.genai import types
-import pdfplumber
+
+# Tenta importar pdfplumber; se não existir, usa pypdf para não derrubar a aplicação
+try:
+    import pdfplumber
+    HAS_PDFPLUMBER = True
+except ImportError:
+    from pypdf import PdfReader
+    HAS_PDFPLUMBER = False
 
 # =========================================================
 # 1. CONFIGURAÇÃO DA PÁGINA E INTERFACE
@@ -72,19 +79,26 @@ ROMANO não passa pano. ROMANO responde com base. ROMANO não inventa. ROMANO re
 """.strip()
 
 # =========================================================
-# 3. EXTRATOR DE PDF ROBUSTO (PRESERVA TABELAS)
+# 3. EXTRATOR DE PDF HÍBRIDO (COM FALLBACK)
 # =========================================================
 @st.cache_resource
 def criar_cliente():
     api_key = os.getenv("GEMINI_API_KEY") or st.secrets.get("GEMINI_API_KEY", "")
     return genai.Client(api_key=api_key) if api_key else None
 
-def extrair_texto_pdf_estruturado(caminho_pdf: str) -> str:
+def extrair_texto_pdf(caminho_pdf: str) -> str:
     partes = []
     try:
-        with pdfplumber.open(caminho_pdf) as pdf:
-            for pagina in pdf.pages:
-                txt = pagina.extract_text(layout=True)
+        if HAS_PDFPLUMBER:
+            with pdfplumber.open(caminho_pdf) as pdf:
+                for pagina in pdf.pages:
+                    txt = pagina.extract_text(layout=True)
+                    if txt:
+                        partes.append(txt)
+        else:
+            reader = PdfReader(caminho_pdf)
+            for pagina in reader.pages:
+                txt = pagina.extract_text()
                 if txt:
                     partes.append(txt)
     except Exception:
@@ -108,10 +122,9 @@ def carregar_e_indexar_base():
                 with open(caminho, "r", encoding="utf-8", errors="ignore") as f:
                     texto = f.read()
             else:
-                texto = extrair_texto_pdf_estruturado(caminho)
+                texto = extrair_texto_pdf(caminho)
 
             if texto:
-                # Divisão em Chunks
                 inicio = 0
                 chunk_id = 1
                 while inicio < len(texto):
@@ -142,17 +155,14 @@ def buscar_contexto(pergunta: str):
         arq_lower = item["arquivo"].lower()
         score = 0
 
-        # Pontuação por termos
         for t in tokens:
             if len(t) > 2:
                 score += chunk_lower.count(t) * 3
 
-        # Impulso para Tabelas e Regulamento quando houver dados numéricos de área/lotação
         if any(k in termo_busca for k in ["m2", "m²", "lotação", "lotacao", "pessoas", "exigências", "exigencias", "medidas"]):
             if "tabela" in chunk_lower or "regulamento" in arq_lower or "decreto" in arq_lower:
                 score += 50
 
-        # Busca exata do grupo/divisão (ex: F-11, F-1) sem confusão de substrings
         match_grupo = re.search(r'\b[a-m]-\d+\b', termo_busca)
         if match_grupo:
             grupo_procurado = match_grupo.group(0)
@@ -252,6 +262,7 @@ if pergunta:
         else:
             st.markdown(res["texto"])
             debug_info = (
+                f"Leitor Tabular Ativo: {'pdfplumber' if HAS_PDFPLUMBER else 'pypdf (Fallback)'}\n"
                 f"Trechos Recuperados: {len(res['trechos'])}\n"
                 f"Motor: {res['modelo']}\n"
                 f"Tempo: {res['tempo']} s"
