@@ -16,19 +16,18 @@ except ImportError:
 st.set_page_config(
     page_title="ROMANO - Buscador Normativo",
     layout="wide",
-    initial_sidebar_state="expanded"
+    initial_sidebar_state="collapsed"
 )
 
 st.markdown("""
 <style>
 [data-testid="stHeader"], footer { visibility: hidden; height: 0px; }
 html, body, .stApp { background-color: #0e1117 !important; color: #f0f6fc !important; }
-.stChatInputContainer, div[data-testid="stChatInput"] { background-color: #161b22 !important; border: 1px solid #30363d !important; border-radius: 10px !important; }
 .main .block-container { max-width: 1100px; padding-top: 1rem; padding-bottom: 2rem; }
 .romano-wrap { text-align: center; margin-top: 0.5rem; margin-bottom: 1.5rem; }
-.romano-title { font-size: 42px; font-weight: 900; letter-spacing: 2px; color: #ffffff; margin-bottom: 0.1rem; }
-.romano-subtitle { font-size: 18px; font-weight: 600; color: #8b949e; margin-bottom: 0.5rem; }
-.romano-slogan { font-size: 13px; color: #6e7681; text-transform: uppercase; letter-spacing: 1px; }
+.romano-title { font-size: 38px; font-weight: 900; letter-spacing: 2px; color: #ffffff; margin-bottom: 0.1rem; }
+.romano-subtitle { font-size: 16px; font-weight: 600; color: #8b949e; margin-bottom: 0.3rem; }
+.romano-slogan { font-size: 12px; color: #6e7681; text-transform: uppercase; letter-spacing: 1px; }
 .resultado-card { background-color: #161b22; border: 1px solid #30363d; border-radius: 8px; padding: 15px; margin-bottom: 15px; }
 .fonte-header { font-weight: bold; color: #58a6ff; margin-bottom: 8px; font-size: 14px; }
 .trecho-texto { font-family: monospace; font-size: 13px; white-space: pre-wrap; color: #c9d1d9; background-color: #0d1117; padding: 10px; border-radius: 5px; }
@@ -38,12 +37,11 @@ html, body, .stApp { background-color: #0e1117 !important; color: #f0f6fc !impor
 BASE_CONHECIMENTO_DIR = "base_conhecimento"
 
 # =========================================================
-# 2. FUNÇÕES DE NORMALIZAÇÃO DE TEXTO
+# 2. FUNÇÕES DE TRATAMENTO DE TEXTO
 # =========================================================
 def normalizar(texto: str) -> str:
     if not texto:
         return ""
-    # Remove acentos e converte para minúsculas
     nfkd = unicodedata.normalize('NFD', texto)
     texto_sem_acento = "".join([c for c in nfkd if unicodedata.category(c) != 'Mn'])
     return re.sub(r'[^a-zA-Z0-9\s-]', ' ', texto_sem_acento).lower().strip()
@@ -90,7 +88,6 @@ def carregar_base_conhecimento():
 
             if texto:
                 arquivos_lidos += 1
-                # Quebra em blocos menores (janelas de 800 caracteres)
                 linhas = texto.split("\n")
                 bloco_atual = []
                 tamanho_atual = 0
@@ -121,7 +118,7 @@ def carregar_base_conhecimento():
     return base_dados, arquivos_lidos
 
 # =========================================================
-# 3. MOTOR DE BUSCA ALGORÍTMICO MEJORADO
+# 3. MOTOR DE BUSCA
 # =========================================================
 def buscar_na_base(termo: str):
     base, _ = carregar_base_conhecimento()
@@ -136,12 +133,10 @@ def buscar_na_base(termo: str):
         score = 0
         texto_norm = item["texto_norm"]
 
-        # Busca por tokens da consulta
         for token in tokens:
             if token in texto_norm:
                 score += texto_norm.count(token) * 10
 
-        # Bônus para termos compostos exatos
         if termo_norm in texto_norm:
             score += 100
 
@@ -156,7 +151,7 @@ def buscar_na_base(termo: str):
     return resultados[:15]
 
 # =========================================================
-# 4. INTERFACE GRÁFICA
+# 4. INTERFACE PRINCIPAL
 # =========================================================
 st.markdown("""
 <div class="romano-wrap">
@@ -169,23 +164,27 @@ st.markdown("""
 base_indexada, total_pdfs = carregar_base_conhecimento()
 
 with st.sidebar:
-    st.subheader("Status da Base Local")
-    st.info(f"PDFs/TXTs Lidos: **{total_pdfs}**")
-    st.info(f"Blocos de Texto: **{len(base_indexada)}**")
+    st.subheader("Painel de Diagnóstico")
+    st.info(f"Arquivos Lidos: **{total_pdfs}**")
+    st.info(f"Blocos Mapeados: **{len(base_indexada)}**")
     if st.button("Recarregar Base", use_container_width=True):
         st.cache_data.clear()
         st.rerun()
 
-query = st.chat_input("Digite sua consulta (ex: largura escada, F-11, extintores)...")
+# CAMPO DE BUSCA FIXO NO TOPO
+query = st.text_input(
+    label="Pesquisa Normativa",
+    placeholder="Digite os termos da busca (ex: largura escada, F-11, extintores)...",
+    label_visibility="collapsed"
+)
 
 if query:
-    st.markdown(f"**Consulta:** `{query}`")
     resultados = buscar_na_base(query)
 
     if not resultados:
-        st.error(f"Nenhum resultado encontrado para '{query}'. Verifique se o termo consta nos documentos locais ou consulte o painel lateral.")
+        st.error(f"Nenhum trecho localizado para '{query}'. Verifique os arquivos na pasta 'base_conhecimento'.")
     else:
-        st.success(f"{len(resultados)} trechos relevantes localizados.")
+        st.success(f"{len(resultados)} trechos relevantes encontrados.")
         for r in resultados:
             st.markdown(f"""
             <div class="resultado-card">
