@@ -82,35 +82,43 @@ def gerar_resposta_romus(pergunta, evidencias, pesquisar_web):
         return f"Erro na comunicação com a IA: {str(e)}"
 
 # ==============================================================================
-# 6. INTERFACE DO USUÁRIO (STREAMLIT UI)
+# 6. GERENCIAMENTO DO HISTÓRICO DAS MENSAGENS (SESSION STATE)
 # ==============================================================================
-pergunta = st.text_area(
-    "Digite sua pergunta:",
-    placeholder="Ex: Para uma edificação com população de 100 pessoas, quantas unidades de passagem são necessárias e qual deve ser a largura da saída de emergência? Grupo F-11",
-    height=120
-)
+if "mensagens" not in st.session_state:
+    st.session_state.mensagens = []
 
-pesquisar_web = st.checkbox("Pesquisar na web se a base não responder", value=True)
+# Exibe as mensagens do histórico na tela
+for msg in st.session_state.mensagens:
+    with st.chat_message(msg["role"]):
+        st.markdown(msg["content"])
 
-col1, col2 = st.columns([1, 4])
-with col1:
-    btn_perguntar = st.button("Perguntar", type="primary", use_container_width=True)
-with col2:
-    btn_recarregar = st.button("Recarregar base", use_container_width=True)
+# Opção de controle no topo/sidebar
+with st.sidebar:
+    pesquisar_web = st.checkbox("Pesquisar na web se a base não responder", value=True)
+    if st.button("Limpar Conversa", use_container_width=True):
+        st.session_state.mensagens = []
+        st.rerun()
 
-if btn_recarregar:
-    st.cache_data.clear()
-    st.success("Base recarregada com sucesso!")
+# ==============================================================================
+# 7. ENTRADA DO USUÁRIO (BARRA FIXA NA PARTE INFERIOR)
+# ==============================================================================
+pergunta = st.chat_input("Digite sua pergunta técnica...")
 
-if btn_perguntar and pergunta:
-    with st.spinner("Buscando evidências e gerando diagnóstico técnico..."):
-        evidencias = buscar_na_base_dados(pergunta)
-        resposta = gerar_resposta_romus(pergunta, evidencias, pesquisar_web)
+if pergunta:
+    # Registra e exibe a mensagem do usuário
+    st.session_state.mensagens.append({"role": "user", "content": pergunta})
+    with st.chat_message("user"):
+        st.markdown(pergunta)
 
-        st.markdown("### ROMUS.IA")
-        
-        with st.expander("Diagnóstico técnico", expanded=True):
-            st.write(resposta)
+    # Processa e exibe a resposta do assistente
+    with st.chat_message("assistant"):
+        with st.spinner("Analisando normas e processando resposta..."):
+            evidencias = buscar_na_base_dados(pergunta)
+            resposta = gerar_resposta_romus(pergunta, evidencias, pesquisar_web)
+            st.markdown(resposta)
 
-        with st.expander("Documentos encontrados na base", expanded=False):
-            st.code(evidencias, language="text")
+            with st.expander("Documentos consultados na base", expanded=False):
+                st.code(evidencias, language="text")
+
+    # Registra a resposta no histórico
+    st.session_state.mensagens.append({"role": "assistant", "content": resposta})
