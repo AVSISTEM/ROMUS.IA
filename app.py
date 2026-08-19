@@ -1,11 +1,8 @@
 import os
 import re
-import time
 import streamlit as st
-from google import genai
-from google.genai import types
 
-# Tenta importar pdfplumber para preservar tabelas; se não existir, usa pypdf para não travar
+# Tenta usar pdfplumber para preservar formatação de tabelas; fallback para pypdf
 try:
     import pdfplumber
     HAS_PDFPLUMBER = True
@@ -17,7 +14,7 @@ except ImportError:
 # 1. CONFIGURAÇÃO DA PÁGINA E INTERFACE
 # =========================================================
 st.set_page_config(
-    page_title="ROMANO - IA Técnica",
+    page_title="ROMANO - Buscador Normativo",
     layout="wide",
     initial_sidebar_state="collapsed"
 )
@@ -25,70 +22,24 @@ st.set_page_config(
 st.markdown("""
 <style>
 [data-testid="stHeader"], footer { visibility: hidden; height: 0px; }
-[data-testid="chatAvatarIcon-user"], [data-testid="chatAvatarIcon-assistant"],
-div[data-testid="stChatMessage"] > div:first-child { display: none !important; }
-html, body, .stApp, [data-testid="stAppViewContainer"], [data-testid="stBottom"] {
-    background-color: #0e1117 !important; color: #f0f6fc !important;
-}
-.stChatInputContainer, div[data-testid="stChatInput"] {
-    background-color: #161b22 !important; border: 1px solid #30363d !important; border-radius: 10px !important;
-}
+html, body, .stApp { background-color: #0e1117 !important; color: #f0f6fc !important; }
+.stChatInputContainer, div[data-testid="stChatInput"] { background-color: #161b22 !important; border: 1px solid #30363d !important; border-radius: 10px !important; }
 .main .block-container { max-width: 1100px; padding-top: 1rem; padding-bottom: 2rem; }
 .romano-wrap { text-align: center; margin-top: 0.5rem; margin-bottom: 1.5rem; }
 .romano-title { font-size: 42px; font-weight: 900; letter-spacing: 2px; color: #ffffff; margin-bottom: 0.1rem; }
 .romano-subtitle { font-size: 18px; font-weight: 600; color: #8b949e; margin-bottom: 0.5rem; }
 .romano-slogan { font-size: 13px; color: #6e7681; text-transform: uppercase; letter-spacing: 1px; }
-.debug-box { border: 1px solid #30363d; border-radius: 8px; padding: 12px; background: #161b22; font-size: 13px; font-family: monospace; white-space: pre-wrap; color: #c9d1d9; }
+.resultado-card { background-color: #161b22; border: 1px solid #30363d; border-radius: 8px; padding: 15px; margin-bottom: 15px; }
+.fonte-header { font-weight: bold; color: #58a6ff; margin-bottom: 8px; font-size: 14px; }
+.trecho-texto { font-family: monospace; font-size: 13px; white-space: pre-wrap; color: #c9d1d9; background-color: #0d1117; padding: 10px; border-radius: 5px; }
 </style>
 """, unsafe_allow_html=True)
 
-# =========================================================
-# 2. CONFIGURAÇÕES TÉCNICAS E PROMPT DE ELITE
-# =========================================================
 BASE_CONHECIMENTO_DIR = "base_conhecimento"
-MODELO_UNICO = "gemini-3.6-flash"
-TAMANHO_CHUNK = 1500
-SOBREPOSICAO_CHUNK = 250
-TOP_CHUNKS = 10
-
-PROMPT_SISTEMA = """
-Você é o ROMANO, um assistente especialista em Engenharia de Segurança contra Incêndio e Legislação Normativa. Sua função é analisar ordens técnicas e correlacioná-las rigorosamente com a base documental fornecida.
-
---- REGRAS INVIOLÁVEIS DE OPERAÇÃO ---
-1. FONTE ÚNICA DE VERDADE: Responda EXCLUSIVAMENTE com base nas informações contidas nos documentos locais fornecidos no CONTEXTO. NUNCA utilize dados de legislações revogadas ou de outros estados que não estejam nos documentos.
-2. CONSULTA A TABELAS DE EXIGÊNCIAS: Quando for solicitada a verificação de medidas de segurança para uma edificação:
-   - Identifique a Ocupação/Divisão (Ex: F-11, A-1, C-2).
-   - Verifique os limites de área (m²), altura ou lotação declarados na ordem.
-   - Cruze essas variáveis diretamente com as tabelas do Regulamento local presentes no contexto.
-3. AUSÊNCIA DE DADOS: Se o trecho do documento fornecido no contexto não contiver a tabela completa de exigências para a ocupação solicitada, informe de forma clara: "Base local parcial: o trecho recuperado do documento não contém a tabela de exigências específica para esta área/lotação."
-4. TOM E ESTRUTURA: Seja ultraobjetivo, técnico, direto e profissional. Não use saudações informais ou floreios.
-
---- ESTRUTURA OBRIGATÓRIA DA RESPOSTA ---
-
-RESPOSTA DIRETA:
-[Apresente a classificação exata e/ou a lista tabulada das medidas de segurança exigidas para a edificação]
-
-FUNDAMENTAÇÃO TÉCNICA:
-[Citação nominal do arquivo local, Tabela de Exigências, Artigo, Item ou Anexo consultado]
-
-GRAU DE CERTEZA TÉCNICA:
-[Análise feita estritamente via Base Local Documental]
-
-OBSERVAÇÃO OPERACIONAL:
-[Exceções da norma, notas de rodapé de tabela ou observações de aplicação prática, se houver]
-
-BORDÃO OPERACIONAL
-ROMANO não passa pano. ROMANO responde com base. ROMANO não inventa. ROMANO resolve.
-""".strip()
 
 # =========================================================
-# 3. EXTRATOR DE PDF HÍBRIDO
+# 2. EXTRATOR DE TEXTO E INDEXADOR LOCAL
 # =========================================================
-@st.cache_resource
-def criar_cliente():
-    api_key = os.getenv("GEMINI_API_KEY") or st.secrets.get("GEMINI_API_KEY", "")
-    return genai.Client(api_key=api_key) if api_key else None
-
 def extrair_texto_pdf(caminho_pdf: str) -> str:
     partes = []
     try:
@@ -109,10 +60,10 @@ def extrair_texto_pdf(caminho_pdf: str) -> str:
     return "\n".join(partes).strip()
 
 @st.cache_data(show_spinner=False)
-def carregar_e_indexar_base():
-    indice = []
+def carregar_base_conhecimento():
+    base_dados = []
     if not os.path.exists(BASE_CONHECIMENTO_DIR):
-        return indice
+        return base_dados
 
     for raiz, _, arquivos in os.walk(BASE_CONHECIMENTO_DIR):
         for arquivo in arquivos:
@@ -128,154 +79,86 @@ def carregar_e_indexar_base():
                 texto = extrair_texto_pdf(caminho)
 
             if texto:
-                inicio = 0
-                chunk_id = 1
-                while inicio < len(texto):
-                    fim = min(len(texto), inicio + TAMANHO_CHUNK)
-                    chunk = texto[inicio:fim].strip()
-                    if chunk:
-                        indice.append({"arquivo": nome_relativo, "chunk_id": chunk_id, "texto": chunk})
-                        chunk_id += 1
-                    if fim >= len(texto):
-                        break
-                    inicio += (TAMANHO_CHUNK - SOBREPOSICAO_CHUNK)
-    return indice
+                # Quebra em blocos por parágrafo ou tabela (quebras duplas)
+                blocos = [b.strip() for b in texto.split("\n\n") if len(b.strip()) > 30]
+                for idx, bloco in enumerate(blocos):
+                    base_dados.append({
+                        "arquivo": nome_relativo,
+                        "bloco_id": idx + 1,
+                        "texto": bloco
+                    })
+    return base_dados
 
 # =========================================================
-# 4. MOTOR DE BUSCA COM RELEVÂNCIA NORMATIVA
+# 3. MOTOR DE BUSCA ALGORÍTMICO (SEM IA)
 # =========================================================
-def buscar_contexto(pergunta: str):
-    indice = carregar_e_indexar_base()
-    if not indice:
-        return [], ""
+def buscar_na_base(termo: str):
+    base = carregar_base_conhecimento()
+    if not base:
+        return []
 
-    termo_busca = pergunta.lower()
-    tokens = re.findall(r'\b\w+\b', termo_busca)
+    termo_limpo = termo.lower().strip()
+    tokens = re.findall(r'\b\w+\b', termo_limpo)
     
+    # Identifica ocupação específica tipo F-11, A-1, C-2
+    match_grupo = re.search(r'\b[a-m]-\d+\b', termo_limpo)
+    grupo_procurado = match_grupo.group(0) if match_grupo else None
+
     resultados = []
-    for item in indice:
-        chunk_lower = item["texto"].lower()
-        arq_lower = item["arquivo"].lower()
+    for item in base:
+        texto_lower = item["texto"].lower()
         score = 0
 
+        # Regra 1: Correspondência exata da ocupação (Ex: F-11)
+        if grupo_procurado and grupo_procurado in texto_lower:
+            score += 200
+
+        # Regra 2: Contagem de palavras digitadas
         for t in tokens:
-            if len(t) > 2:
-                score += chunk_lower.count(t) * 3
+            if len(t) > 2 and t in texto_lower:
+                score += texto_lower.count(t) * 10
 
-        if any(k in termo_busca for k in ["m2", "m²", "lotação", "lotacao", "pessoas", "exigências", "exigencias", "medidas"]):
-            if "tabela" in chunk_lower or "regulamento" in arq_lower or "decreto" in arq_lower:
-                score += 50
-
-        match_grupo = re.search(r'\b[a-m]-\d+\b', termo_busca)
-        if match_grupo:
-            grupo_procurado = match_grupo.group(0)
-            if grupo_procurado in chunk_lower:
-                score += 100
+        # Regra 3: Bônus se contiver termos de tabela/norma
+        if any(k in termo_limpo for k in ["medidas", "exigencias", "exigências", "m2", "m²", "lotação"]):
+            if any(tabelak in texto_lower for tabelak in ["tabela", "medida", "exigência", "existente"]):
+                score += 30
 
         if score > 0:
-            resultados.append({"arquivo": item["arquivo"], "texto": item["texto"], "score": score})
+            resultados.append({
+                "arquivo": item["arquivo"],
+                "texto": item["texto"],
+                "score": score
+            })
 
+    # Ordena pelos trechos de maior relevância
     resultados.sort(key=lambda x: x["score"], reverse=True)
-    top_results = resultados[:TOP_CHUNKS]
-
-    contexto_str = "\n\n".join([f"--- FONTE: {r['arquivo']} ---\n{r['texto']}" for r in top_results])
-    return top_results, contexto_str
+    return resultados[:15]
 
 # =========================================================
-# 5. PROCESSAMENTO DE PERGUNTAS
-# =========================================================
-def processar_ordem(pergunta: str, historico: list):
-    inicio = time.time()
-    trechos, contexto = buscar_contexto(pergunta)
-    cliente = criar_cliente()
-
-    if not cliente:
-        return {"ok": False, "erro": "Chave GEMINI_API_KEY não encontrada nas variáveis de ambiente do Streamlit."}
-
-    contents = []
-    for msg in historico[:-1]:
-        role_api = "user" if msg["role"] == "user" else "model"
-        contents.append(types.Content(role=role_api, parts=[types.Part.from_text(text=msg["content"])]))
-
-    prompt_envio = f"ORDEM DO COMANDANTE:\n{pergunta}\n\nDOCUMENTOS CONSULTADOS NA BASE LOCAL:\n{contexto if contexto else 'Nenhum documento retornado.'}"
-    contents.append(types.Content(role="user", parts=[types.Part.from_text(text=prompt_envio)]))
-
-    try:
-        resposta = cliente.models.generate_content(
-            model=MODELO_UNICO,
-            contents=contents,
-            config=types.GenerateContentConfig(
-                system_instruction=PROMPT_SISTEMA,
-                temperature=0.0
-            )
-        )
-        tempo = round(time.time() - inicio, 2)
-        return {
-            "ok": True,
-            "texto": resposta.text.strip(),
-            "tempo": tempo,
-            "trechos": trechos,
-            "modelo": MODELO_UNICO
-        }
-    except Exception as e:
-        return {"ok": False, "erro": str(e)}
-
-# =========================================================
-# 6. INTERFACE STREAMLIT
+# 4. INTERFACE GRÁFICA
 # =========================================================
 st.markdown("""
 <div class="romano-wrap">
     <div class="romano-title">ROMANO</div>
-    <div class="romano-subtitle">A IA QUE NÃO PASSA PANO</div>
-    <div class="romano-slogan">Inteligência Técnica • Autonomia Local • Respostas Diretas</div>
+    <div class="romano-subtitle">BUSCADOR NORMATIVO ALGORÍTMICO</div>
+    <div class="romano-slogan">0% API • 100% Local • Resposta Instantânea</div>
 </div>
 """, unsafe_allow_html=True)
 
-with st.sidebar:
-    st.subheader("Painel de Controle")
-    mostrar_debug = st.checkbox("Exibir Diagnóstico Técnico", value=True)
-    if st.button("Limpar Histórico", use_container_width=True):
-        st.session_state.mensagens = []
-        st.rerun()
+query = st.chat_input("Digite a ocupação, norma ou parâmetro (ex: F-11, 250m2, tabela)...")
 
-if "mensagens" not in st.session_state:
-    st.session_state.mensagens = []
+if query:
+    st.markdown(f"**Consulta:** `{query}`")
+    resultados = buscar_na_base(query)
 
-for msg in st.session_state.mensagens:
-    with st.chat_message(msg["role"], avatar=None):
-        st.markdown(msg["content"])
-        if "debug" in msg and mostrar_debug and msg["debug"]:
-            with st.expander("Diagnóstico Operacional", expanded=False):
-                st.markdown(f'<div class="debug-box">{msg["debug"]}</div>', unsafe_allow_html=True)
-
-pergunta = st.chat_input("Digite sua ordem ou consulta técnica...")
-
-if pergunta:
-    st.session_state.mensagens.append({"role": "user", "content": pergunta})
-    with st.chat_message("user", avatar=None):
-        st.markdown(pergunta)
-
-    with st.chat_message("assistant", avatar=None):
-        with st.spinner("ROMANO consultando base local..."):
-            res = processar_ordem(pergunta, st.session_state.mensagens)
-
-        if not res["ok"]:
-            st.error("Falha na execução.")
-            st.code(res["erro"])
-        else:
-            st.markdown(res["texto"])
-            debug_info = (
-                f"Leitor Tabular Ativo: {'pdfplumber' if HAS_PDFPLUMBER else 'pypdf (Fallback)'}\n"
-                f"Trechos Recuperados: {len(res['trechos'])}\n"
-                f"Motor: {res['modelo']}\n"
-                f"Tempo: {res['tempo']} s"
-            )
-            if mostrar_debug:
-                with st.expander("Diagnóstico Operacional", expanded=False):
-                    st.markdown(f'<div class="debug-box">{debug_info}</div>', unsafe_allow_html=True)
-
-            st.session_state.mensagens.append({
-                "role": "assistant",
-                "content": res["texto"],
-                "debug": debug_info
-            })
+    if not resultados:
+        st.warning("Nenhum trecho correspondente foi localizado na pasta 'base_conhecimento'.")
+    else:
+        st.success(f"{len(resultados)} trechos relevantes localizados na base local.")
+        for r in resultados:
+            st.markdown(f"""
+            <div class="resultado-card">
+                <div class="fonte-header">📄 Arquivo: {r['arquivo']} (Relevância: {r['score']})</div>
+                <div class="trecho-texto">{r['texto']}</div>
+            </div>
+            """, unsafe_allow_html=True)
