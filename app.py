@@ -7,7 +7,7 @@ from google.genai import types
 from pypdf import PdfReader
 
 # =========================================================
-# 1. CONFIGURAÇÃO DA PÁGINA E ESTILO VISUAL (ESCUDO iOS FIX)
+# 1. CONFIGURAÇÃO DA PÁGINA E ESTILO ESCURO (iOS FIX & SEM ÍCONES)
 # =========================================================
 st.set_page_config(
     page_title="ROMANO",
@@ -15,11 +15,29 @@ st.set_page_config(
     initial_sidebar_state="collapsed"
 )
 
+# CSS para ocultar avatares, cabeçalhos e forçar fundo preto no iOS
 st.markdown("""
 <style>
 /* Remove o cabeçalho/rodapé padrão do Streamlit */
 [data-testid="stHeader"], footer {
     visibility: hidden;
+}
+
+/* Oculta totalmente os ícones/avatares do chat */
+[data-testid="chatAvatarIcon-user"], 
+[data-testid="chatAvatarIcon-assistant"],
+div[data-testid="stChatMessage"] > div:first-child {
+    display: none !important;
+}
+
+/* Força fundo preto no container do chat para não cortar no teclado iOS */
+html, body, .stApp, [data-testid="stAppViewContainer"], [data-testid="stBottom"] {
+    background-color: #0e1117 !important;
+}
+
+.stChatInputContainer, div[data-testid="stChatInput"] {
+    background-color: #0e1117 !important;
+    border-color: #30363d !important;
 }
 
 .main .block-container {
@@ -49,11 +67,6 @@ st.markdown("""
 .romano-slogan {
     font-size: 14px;
     opacity: 0.75;
-}
-
-/* Garante fundo escuro na barra de chat inferior no mobile */
-.stChatInputContainer, div[data-testid="stChatInput"] {
-    background-color: #0e1117 !important;
 }
 
 .debug-box {
@@ -370,9 +383,9 @@ with st.sidebar:
 if "mensagens" not in st.session_state:
     st.session_state.mensagens = []
 
-# Exibe mensagens anteriores sem ícones
+# Exibe mensagens anteriores (sem ícone)
 for msg in st.session_state.mensagens:
-    with st.chat_message(msg["role"], avatar=""):
+    with st.chat_message(msg["role"], avatar=None):
         st.markdown(msg["content"])
         if "debug" in msg and mostrar_debug:
             with st.expander("Diagnóstico Técnico", expanded=False):
@@ -384,11 +397,11 @@ pergunta = st.chat_input("Digite sua ordem...")
 if pergunta:
     # Registra e exibe a mensagem do usuário
     st.session_state.mensagens.append({"role": "user", "content": pergunta})
-    with st.chat_message("user", avatar=""):
+    with st.chat_message("user", avatar=None):
         st.markdown(pergunta)
 
     # Processa e exibe a resposta do ROMANO
-    with st.chat_message("assistant", avatar=""):
+    with st.chat_message("assistant", avatar=None):
         with st.spinner("ROMANO consultando a base..."):
             resultado = gerar_resposta(pergunta, modo_estrito=modo_estrito)
 
@@ -424,3 +437,5 @@ if pergunta:
                 "content": resultado["texto"],
                 "debug": debug_texto
             })
+
+    
