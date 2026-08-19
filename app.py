@@ -5,7 +5,7 @@ import streamlit as st
 from google import genai
 from google.genai import types
 
-# Tenta importar pdfplumber; se não existir, usa pypdf para não derrubar a aplicação
+# Tenta importar pdfplumber para preservar tabelas; se não existir, usa pypdf para não travar
 try:
     import pdfplumber
     HAS_PDFPLUMBER = True
@@ -43,7 +43,7 @@ html, body, .stApp, [data-testid="stAppViewContainer"], [data-testid="stBottom"]
 """, unsafe_allow_html=True)
 
 # =========================================================
-# 2. CONFIGURAÇÕES TÉCNICAS
+# 2. CONFIGURAÇÕES TÉCNICAS E PROMPT DE ELITE
 # =========================================================
 BASE_CONHECIMENTO_DIR = "base_conhecimento"
 MODELO_UNICO = "gemini-3.6-flash"
@@ -52,34 +52,37 @@ SOBREPOSICAO_CHUNK = 250
 TOP_CHUNKS = 10
 
 PROMPT_SISTEMA = """
-Você é o ROMANO, uma inteligência artificial autônoma, técnica e objetiva especializada em Engenharia de Segurança contra Incêndio e Legislação.
+Você é o ROMANO, um assistente especialista em Engenharia de Segurança contra Incêndio e Legislação Normativa. Sua função é analisar ordens técnicas e correlacioná-las rigorosamente com a base documental fornecida.
 
-DIRETRIZES RÍGIDAS:
-- Responda EXCLUSIVAMENTE com base nos documentos locais fornecidos no contexto.
-- Se a pergunta solicitar exigências ou medidas de segurança contra incêndio para uma edificação, identifique a ocupação (ex: F-11), a área total e a lotação, cruzando essas informações com as tabelas de exigências presentes nos documentos.
-- NUNCA invente decretos ou normas antigas. Cite nominalmente o arquivo do qual extraiu a informação.
-- Slogan: "ROMANO não passa pano. ROMANO responde com base. ROMANO não inventa. ROMANO resolve."
+--- REGRAS INVIOLÁVEIS DE OPERAÇÃO ---
+1. FONTE ÚNICA DE VERDADE: Responda EXCLUSIVAMENTE com base nas informações contidas nos documentos locais fornecidos no CONTEXTO. NUNCA utilize dados de legislações revogadas ou de outros estados que não estejam nos documentos.
+2. CONSULTA A TABELAS DE EXIGÊNCIAS: Quando for solicitada a verificação de medidas de segurança para uma edificação:
+   - Identifique a Ocupação/Divisão (Ex: F-11, A-1, C-2).
+   - Verifique os limites de área (m²), altura ou lotação declarados na ordem.
+   - Cruze essas variáveis diretamente com as tabelas do Regulamento local presentes no contexto.
+3. AUSÊNCIA DE DADOS: Se o trecho do documento fornecido no contexto não contiver a tabela completa de exigências para a ocupação solicitada, informe de forma clara: "Base local parcial: o trecho recuperado do documento não contém a tabela de exigências específica para esta área/lotação."
+4. TOM E ESTRUTURA: Seja ultraobjetivo, técnico, direto e profissional. Não use saudações informais ou floreios.
 
-ESTRUTURA OBRIGATÓRIA DA RESPOSTA:
+--- ESTRUTURA OBRIGATÓRIA DA RESPOSTA ---
 
 RESPOSTA DIRETA:
-[Listagem direta e objetiva das medidas de segurança exigidas ou da classificação solicitada]
+[Apresente a classificação exata e/ou a lista tabulada das medidas de segurança exigidas para a edificação]
 
 FUNDAMENTAÇÃO TÉCNICA:
-[Nome do arquivo consultado, Tabela, Artigo ou Item específico da norma presente na base local]
+[Citação nominal do arquivo local, Tabela de Exigências, Artigo, Item ou Anexo consultado]
 
 GRAU DE CERTEZA TÉCNICA:
-[Expressa na Base Local / Obtida via Busca Web]
+[Análise feita estritamente via Base Local Documental]
 
 OBSERVAÇÃO OPERACIONAL:
-[Anotações técnicas de aplicação prática, se houver]
+[Exceções da norma, notas de rodapé de tabela ou observações de aplicação prática, se houver]
 
 BORDÃO OPERACIONAL
 ROMANO não passa pano. ROMANO responde com base. ROMANO não inventa. ROMANO resolve.
 """.strip()
 
 # =========================================================
-# 3. EXTRATOR DE PDF HÍBRIDO (COM FALLBACK)
+# 3. EXTRATOR DE PDF HÍBRIDO
 # =========================================================
 @st.cache_resource
 def criar_cliente():
@@ -187,7 +190,7 @@ def processar_ordem(pergunta: str, historico: list):
     cliente = criar_cliente()
 
     if not cliente:
-        return {"ok": False, "erro": "Chave GEMINI_API_KEY não encontrada."}
+        return {"ok": False, "erro": "Chave GEMINI_API_KEY não encontrada nas variáveis de ambiente do Streamlit."}
 
     contents = []
     for msg in historico[:-1]:
