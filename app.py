@@ -7,7 +7,7 @@ from google.genai import types
 from pypdf import PdfReader
 
 # =========================================================
-# 1. CONFIGURAÇÃO DA PÁGINA E ESTILO ESCURO (iOS FIX & SEM ÍCONES)
+# 1. CONFIGURAÇÃO DA PÁGINA E TEMA ESCURO
 # =========================================================
 st.set_page_config(
     page_title="ROMANO",
@@ -15,35 +15,39 @@ st.set_page_config(
     initial_sidebar_state="collapsed"
 )
 
-# CSS para ocultar avatares, cabeçalhos e forçar fundo preto no iOS
+# Injeção de CSS para travar o fundo em preto no iOS e ocultar avatares
 st.markdown("""
 <style>
-/* Remove o cabeçalho/rodapé padrão do Streamlit */
+/* Oculta o cabeçalho e rodapé padrão do Streamlit */
 [data-testid="stHeader"], footer {
     visibility: hidden;
 }
 
-/* Oculta totalmente os ícones/avatares do chat */
+/* Oculta totalmente os ícones/avatares das mensagens */
 [data-testid="chatAvatarIcon-user"], 
 [data-testid="chatAvatarIcon-assistant"],
 div[data-testid="stChatMessage"] > div:first-child {
     display: none !important;
 }
 
-/* Força fundo preto no container do chat para não cortar no teclado iOS */
-html, body, .stApp, [data-testid="stAppViewContainer"], [data-testid="stBottom"] {
+/* Força fundo preto absoluto em todos os containers e na área de rolagem do iOS */
+html, body, .stApp, [data-testid="stAppViewContainer"], [data-testid="stBottom"], [data-testid="stChatInput"] {
     background-color: #0e1117 !important;
+    color: #f0f6fc !important;
 }
 
-.stChatInputContainer, div[data-testid="stChatInput"] {
+/* Fixação da barra inferior para não vazar fundo claro ao abrir o teclado */
+.stChatInputContainer {
     background-color: #0e1117 !important;
     border-color: #30363d !important;
+    position: fixed;
+    bottom: 0;
 }
 
 .main .block-container {
     max-width: 1100px;
     padding-top: 1rem;
-    padding-bottom: 5rem;
+    padding-bottom: 6rem;
 }
 
 .romano-wrap {
@@ -82,11 +86,11 @@ html, body, .stApp, [data-testid="stAppViewContainer"], [data-testid="stBottom"]
 """, unsafe_allow_html=True)
 
 # =========================================================
-# 2. CONFIGURAÇÕES GERAIS E PARÂMETROS
+# 2. CONFIGURAÇÕES GERAIS E ATUALIZAÇÃO DO MODELO GEMINI
 # =========================================================
 BASE_CONHECIMENTO_DIR = "base_conhecimento"
 ARQUIVOS_SUPORTADOS = (".txt", ".pdf")
-MODELO_GEMINI = "gemini-2.5-flash"
+MODELO_GEMINI = "gemini-3.6-flash"  # Atualizado para o modelo exigido pela API
 
 TAMANHO_CHUNK = 1800
 SOBREPOSICAO_CHUNK = 250
@@ -383,7 +387,7 @@ with st.sidebar:
 if "mensagens" not in st.session_state:
     st.session_state.mensagens = []
 
-# Exibe mensagens anteriores (sem ícone)
+# Exibe mensagens anteriores (sem ícones/carinhas)
 for msg in st.session_state.mensagens:
     with st.chat_message(msg["role"], avatar=None):
         st.markdown(msg["content"])
@@ -437,5 +441,3 @@ if pergunta:
                 "content": resultado["texto"],
                 "debug": debug_texto
             })
-
-    
