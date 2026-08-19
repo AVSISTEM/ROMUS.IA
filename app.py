@@ -92,7 +92,6 @@ html, body, .stApp, [data-testid="stAppViewContainer"], [data-testid="stBottom"]
 BASE_CONHECIMENTO_DIR = "base_conhecimento"
 ARQUIVOS_SUPORTADOS = (".txt", ".pdf")
 
-# Modelo Oficial Ativo
 MODELO_UNICO = "gemini-3.6-flash"
 
 TAMANHO_CHUNK = 1500
@@ -107,14 +106,14 @@ PALAVRAS_IGNORADAS = {
 }
 
 # =========================================================
-# 3. BASE DE RESPOSTAS RÁPIDAS E LOCAIS (ZERO CONSUMO DE API)
+# 3. BASE DE RESPOSTAS RÁPIDAS LOCAIS
 # =========================================================
 RESPOSTAS_RAPIDAS = {
     ("oi", "olá", "ola", "bom dia", "boa tarde", "boa noite", "comandante"): 
         "RESPOSTA DIRETA:\nPronto para o serviço, Comandante. Envie a ordem ou consulta técnica.\n\nFUNDAMENTAÇÃO TÉCNICA:\nSistema Operacional ROMANO v3.6.\n\nGRAU DE CERTEZA TÉCNICA:\nAtivo e Local.\n\nBORDÃO OPERACIONAL\nROMANO não passa pano. ROMANO responde com base. ROMANO não inventa. ROMANO resolve.",
     
     ("quem é você", "quem e voce", "quem e você", "o que você faz", "quais suas funcoes"): 
-        "RESPOSTA DIRETA:\nSou o ROMANO, uma Inteligência Artificial técnica, objetiva e analítica voltada para legislação, normas e engenharia de segurança.\n\nFUNDAMENTAÇÃO TÉCNICA:\nArquitetura Híbrida de Consulta Local e Raciocínio Normativo.\n\nGRAU DE CERTEZA TÉCNICA:\nModulo Principal.\n\nBORDÃO OPERACIONAL\nROMANO não passa pano. ROMANO responde com base. ROMANO não inventa. ROMANO resolve.",
+        "RESPOSTA DIRETA:\nSou o ROMANO, uma Inteligência Artificial técnica, objetiva e analítica voltada para legislação, normas e engenharia de segurança.\n\nFUNDAMENTAÇÃO TÉCNICA:\nArquitetura Híbrida de Consulta Local e Raciocínio Normativo.\n\nGRAU DE CERTEZA TÉCNICA:\nMódulo Principal.\n\nBORDÃO OPERACIONAL\nROMANO não passa pano. ROMANO responde com base. ROMANO não inventa. ROMANO resolve.",
     
     ("slogan", "bordao", "bordão", "qual seu bordao"): 
         "RESPOSTA DIRETA:\nROMANO não passa pano. ROMANO responde com base. ROMANO não inventa. ROMANO resolve.\n\nFUNDAMENTAÇÃO TÉCNICA:\nDiretriz de Identidade Corporativa.\n\nGRAU DE CERTEZA TÉCNICA:\nIncondicional."
@@ -127,8 +126,9 @@ PROMPT_SISTEMA = """
 Você é o ROMANO, uma inteligência artificial autônoma, técnica e objetiva.
 
 DIRETRIZES
-- Slogan: "A IA que não passa pano. ROMANO responde com base. ROMANO não inventa. ROMANO resolve."
+- Slogan: "ROMANO não passa pano. ROMANO responde com base. ROMANO não inventa. ROMANO resolve."
 - Responda diretamente ao que foi solicitado, de forma extremamente técnica, concisa e sem enrolação.
+- Analise SEMPRE todo o histórico de mensagens da conversa. Se o usuário disser "está errado", identifique imediatamente qual afirmação anterior ele está contestando e reavalie os dados normativos.
 
 ESTRUTURA DE RESPOSTA OBRIGATÓRIA
 
@@ -136,7 +136,7 @@ RESPOSTA DIRETA:
 [Resposta objetiva]
 
 FUNDAMENTAÇÃO TÉCNICA:
-[Norma, artigo, item, tabela ou fonte consultada]
+[Norma, decreto, artigo, item, tabela ou fonte consultada]
 
 GRAU DE CERTEZA TÉCNICA:
 [Expressa na Base Local / Obtida via Busca Web]
@@ -259,44 +259,66 @@ def montar_contexto_local(trechos):
     return "\n\n".join(blocos)
 
 # =========================================================
-# 6. MOTOR DE DECISÃO INTELIGENTE E LOCAL (SEM DEPENDER DE INTERNET)
+# 6. MONTAGEM DE MENSAGENS COM HISTÓRICO COMPLETO
 # =========================================================
-def processar_pergunta(pergunta: str):
+def construir_conteudo_com_historico(historico_mensagens, pergunta_atual, contexto_local):
+    contents = []
+    
+    # Adiciona o contexto do histórico de conversa mantido no Streamlit
+    for msg in historico_mensagens:
+        role_api = "user" if msg["role"] == "user" else "model"
+        contents.append(types.Content(
+            role=role_api,
+            parts=[types.Part.from_text(text=msg["content"])]
+        ))
+
+    # Constrói o texto do turno atual com a inclusão de base local, se houver
+    if contexto_local:
+        prompt_final = f"ORDEM:\n{pergunta_atual}\n\nBASE DOCUMENTAL LOCAL DISPONÍVEL:\n{contexto_local}"
+    else:
+        prompt_final = f"ORDEM:\n{pergunta_atual}\n\nSem correspondência direta na base local. Realize busca para confirmar norma ou regulamento."
+
+    contents.append(types.Content(
+        role="user",
+        parts=[types.Part.from_text(text=prompt_final)]
+    ))
+    
+    return contents
+
+# =========================================================
+# 7. MOTOR DE PROCESSAMENTO DE PERGUNTAS
+# =========================================================
+def processar_pergunta(pergunta: str, historico: list):
     p_clean = pergunta.strip().lower()
 
-    # PASSO 1: Resposta Rápida Direta no Python (Consumo Cero / Ultra-rápido)
-    for gatilhos, resposta_direta in RESPOSTAS_RAPIDAS.items():
-        if any(p_clean == g or p_clean.startswith(g) for g in gatilhos):
-            return {
-                "ok": True,
-                "texto": resposta_direta,
-                "tempo": 0.01,
-                "trechos": [],
-                "usou_web": False,
-                "modelo": "Cache Interno Local",
-                "erro": ""
-            }
+    # PASSO 1: Resposta Rápida (Apenas para saudações e comandos simples isolados)
+    if len(historico) <= 1:
+        for gatilhos, resposta_direta in RESPOSTAS_RAPIDAS.items():
+            if any(p_clean == g or p_clean.startswith(g) for g in gatilhos):
+                return {
+                    "ok": True,
+                    "texto": resposta_direta,
+                    "tempo": 0.01,
+                    "trechos": [],
+                    "usou_web": False,
+                    "modelo": "Cache Interno Local",
+                    "erro": ""
+                }
 
-    # PASSO 2: Busca de Documentos no Banco de Dados Local
+    # PASSO 2: Busca Local
     trechos = buscar_trechos_relevantes(pergunta, TOP_CHUNKS)
     contexto = montar_contexto_local(trechos)
     usou_web = False
 
-    # PASSO 3: Tentativa de Comunicação com a API
     cliente = criar_cliente()
-    
-    if contexto:
-        prompt_usuario = f"ORDEM:\n{pergunta}\n\nBASE DOCUMENTAL LOCAL:\n{contexto}"
-        ferramentas = None
-    else:
-        prompt_usuario = f"ORDEM:\n{pergunta}\n\nSem base local para o termo. Realize busca externa para responder."
-        ferramentas = [{"google_search": {}}]
-        usou_web = True
-
     inicio = time.time()
 
     if cliente:
         try:
+            ferramentas = None if contexto else [{"google_search": {}}]
+            if not contexto:
+                usou_web = True
+
             config_args = {
                 "system_instruction": PROMPT_SISTEMA,
                 "temperature": 0.0
@@ -304,9 +326,12 @@ def processar_pergunta(pergunta: str):
             if ferramentas:
                 config_args["tools"] = ferramentas
 
+            # Constrói as mensagens enviando TODO o histórico
+            contents = construir_conteudo_com_historico(historico[:-1], pergunta, contexto)
+
             resposta = cliente.models.generate_content(
                 model=MODELO_UNICO,
-                contents=prompt_usuario,
+                contents=contents,
                 config=types.GenerateContentConfig(**config_args)
             )
             tempo = round(time.time() - inicio, 2)
@@ -323,16 +348,15 @@ def processar_pergunta(pergunta: str):
             }
         except Exception as e:
             err_msg = str(e)
-            # FALLBACK DE SEGURANÇA: Se a cota da API falhar, mas temos a base local, responde direto do banco local sem derrubar a aplicação
             if contexto:
-                texto_fallback = f"RESPOSTA DIRETA (MODO OFFLINE LOCAL):\nEncontrada correspondência direta no banco de dados local para sua consulta.\n\nTRECHO LOCALIZADO:\n{trechos[0]['trecho'][:1000]}...\n\nFUNDAMENTAÇÃO TÉCNICA:\nArquivo: {trechos[0]['arquivo']}\n\nGRAU DE CERTEZA TÉCNICA:\nExpressa na Base Local (Modo Contingência Off-line)\n\nBORDÃO OPERACIONAL\nROMANO não passa pano. ROMANO responde com base. ROMANO não inventa. ROMANO resolve."
+                texto_fallback = f"RESPOSTA DIRETA (MODO OFFLINE LOCAL):\n{trechos[0]['trecho'][:1000]}...\n\nFUNDAMENTAÇÃO TÉCNICA:\nArquivo: {trechos[0]['arquivo']}\n\nGRAU DE CERTEZA TÉCNICA:\nExpressa na Base Local\n\nBORDÃO OPERACIONAL\nROMANO não passa pano. ROMANO responde com base. ROMANO não inventa. ROMANO resolve."
                 return {
                     "ok": True,
                     "texto": texto_fallback,
                     "tempo": round(time.time() - inicio, 2),
                     "trechos": trechos,
                     "usou_web": False,
-                    "modelo": "Banco Local (Modo Off-line)",
+                    "modelo": "Banco Local (Contingência)",
                     "erro": ""
                 }
             return {
@@ -340,31 +364,19 @@ def processar_pergunta(pergunta: str):
                 "texto": "",
                 "tempo": round(time.time() - inicio, 2),
                 "trechos": trechos,
-                "erro": f"Cota de API temporariamente excedida e sem correspondência exata local. Aguarde 1 minuto. Detalhes: {err_msg}"
+                "erro": f"Erro ou limite de cota atingido. Detalhes: {err_msg}"
             }
-
-    # Se a API nem foi inicializada
-    if contexto:
-        return {
-            "ok": True,
-            "texto": f"RESPOSTA DIRETA (BASE LOCAL):\n{trechos[0]['trecho'][:1000]}\n\nFUNDAMENTAÇÃO TÉCNICA:\n{trechos[0]['arquivo']}\n\nGRAU DE CERTEZA TÉCNICA:\nExpressa na Base Local",
-            "tempo": 0.05,
-            "trechos": trechos,
-            "usou_web": False,
-            "modelo": "Banco Local Direto",
-            "erro": ""
-        }
 
     return {
         "ok": False,
         "texto": "",
         "tempo": 0,
         "trechos": [],
-        "erro": "Chave de API não configurada e nenhuma norma local encontrada."
+        "erro": "Chave GEMINI_API_KEY não localizada nas configurações."
     }
 
 # =========================================================
-# 7. INTERFACE STREAMLIT
+# 8. INTERFACE STREAMLIT
 # =========================================================
 st.markdown("""
 <div class="romano-wrap">
@@ -399,8 +411,8 @@ if pergunta:
         st.markdown(pergunta)
 
     with st.chat_message("assistant", avatar=None):
-        with st.spinner("ROMANO processando..."):
-            resultado = processar_pergunta(pergunta)
+        with st.spinner("ROMANO processando com memória operacional..."):
+            resultado = processar_pergunta(pergunta, st.session_state.mensagens)
 
         if not resultado["ok"]:
             st.error("Erro no processamento.")
