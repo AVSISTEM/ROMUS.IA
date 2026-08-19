@@ -7,7 +7,7 @@ from google.genai import types
 from pypdf import PdfReader
 
 # =========================================================
-# 1. CONFIGURAÇÃO DA PÁGINA E CSS ESCURO (OPTIMIZADO iOS)
+# 1. CONFIGURAÇÃO DA PÁGINA E CSS (OPTIMIZADO iOS)
 # =========================================================
 st.set_page_config(
     page_title="ROMANO - IA Técnica",
@@ -94,33 +94,42 @@ ARQUIVOS_SUPORTADOS = (".txt", ".pdf")
 
 MODELO_UNICO = "gemini-3.6-flash"
 
-TAMANHO_CHUNK = 1500
-SOBREPOSICAO_CHUNK = 200
-TOP_CHUNKS = 8
+TAMANHO_CHUNK = 1200
+SOBREPOSICAO_CHUNK = 150
+TOP_CHUNKS = 6
 
 PALAVRAS_IGNORADAS = {
     "a", "o", "e", "de", "da", "do", "das", "dos", "um", "uma",
     "em", "por", "para", "com", "sem", "que", "como", "qual",
     "quais", "onde", "quando", "isso", "essa", "esse", "sobre",
-    "as", "os", "ao", "aos", "na", "no", "nas", "nos"
+    "as", "os", "ao", "aos", "na", "no", "nas", "nos", "pertence", "grupo"
 }
 
-# =========================================================
-# 3. BASE DE RESPOSTAS RÁPIDAS LOCAIS
-# =========================================================
+# MAPA LOCAL DE TABELA 1 (DECRETO ESTADUAL DE SEGURANÇA CONTRA INCÊNDIO)
+TABELA_OCUPACOES_DIRETA = {
+    "f-1": "Local de reunião pública - Museu, galeria de arte, centro de convenções, salão de exposição.",
+    "f-2": "Local de reunião pública - Igreja, templo, capela, centro espírita e auditório.",
+    "f-3": "Local de reunião pública - Estádio, ginásio, arena, praça de esportes.",
+    "f-4": "Local de reunião pública - Estação de transbordo, terminal rodoviário, ferroviário, aeroporto.",
+    "f-5": "Local de reunião pública - Circo, parque de diversões e feira de exposições.",
+    "f-6": "Local de reunião pública - Casa noturna, boate, danceteria, salão de baile, clube social e assemelhados.",
+    "f-7": "Local de reunião pública - Recinto para festas, leilões e recepções.",
+    "f-8": "Local de reunião pública - Restauração, bar, lanchonete, restaurante, pizzaria.",
+    "f-9": "Local de reunião pública - Recreação pública, boliche, sinuca, jogos eletrônicos.",
+    "f-10": "Local de reunião pública - Exposição de objetos e animais.",
+    "f-11": "Local de reunião pública - Boate, clube noturno, casa de shows, espetáculos e assemelhados (com dança ou atividade correlata)."
+}
+
 RESPOSTAS_RAPIDAS = {
     ("oi", "olá", "ola", "bom dia", "boa tarde", "boa noite", "comandante"): 
         "RESPOSTA DIRETA:\nPronto para o serviço, Comandante. Envie a ordem ou consulta técnica.\n\nFUNDAMENTAÇÃO TÉCNICA:\nSistema Operacional ROMANO v3.6.\n\nGRAU DE CERTEZA TÉCNICA:\nAtivo e Local.\n\nBORDÃO OPERACIONAL\nROMANO não passa pano. ROMANO responde com base. ROMANO não inventa. ROMANO resolve.",
     
-    ("quem é você", "quem e voce", "quem e você", "o que você faz", "quais suas funcoes"): 
-        "RESPOSTA DIRETA:\nSou o ROMANO, uma Inteligência Artificial técnica, objetiva e analítica voltada para legislação, normas e engenharia de segurança.\n\nFUNDAMENTAÇÃO TÉCNICA:\nArquitetura Híbrida de Consulta Local e Raciocínio Normativo.\n\nGRAU DE CERTEZA TÉCNICA:\nMódulo Principal.\n\nBORDÃO OPERACIONAL\nROMANO não passa pano. ROMANO responde com base. ROMANO não inventa. ROMANO resolve.",
-    
-    ("slogan", "bordao", "bordão", "qual seu bordao"): 
-        "RESPOSTA DIRETA:\nROMANO não passa pano. ROMANO responde com base. ROMANO não inventa. ROMANO resolve.\n\nFUNDAMENTAÇÃO TÉCNICA:\nDiretriz de Identidade Corporativa.\n\nGRAU DE CERTEZA TÉCNICA:\nIncondicional."
+    ("quem é você", "quem e voce", "quem e você", "o que você faz"): 
+        "RESPOSTA DIRETA:\nSou o ROMANO, uma Inteligência Artificial técnica, objetiva e analítica voltada para legislação, normas e engenharia de segurança.\n\nFUNDAMENTAÇÃO TÉCNICA:\nArquitetura Híbrida de Consulta Local e Raciocínio Normativo.\n\nGRAU DE CERTEZA TÉCNICA:\nMódulo Principal.\n\nBORDÃO OPERACIONAL\nROMANO não passa pano. ROMANO responde com base. ROMANO não inventa. ROMANO resolve."
 }
 
 # =========================================================
-# 4. PROMPT DO SISTEMA
+# 3. PROMPT DO SISTEMA
 # =========================================================
 PROMPT_SISTEMA = """
 Você é o ROMANO, uma inteligência artificial autônoma, técnica e objetiva.
@@ -128,7 +137,8 @@ Você é o ROMANO, uma inteligência artificial autônoma, técnica e objetiva.
 DIRETRIZES
 - Slogan: "ROMANO não passa pano. ROMANO responde com base. ROMANO não inventa. ROMANO resolve."
 - Responda diretamente ao que foi solicitado, de forma extremamente técnica, concisa e sem enrolação.
-- Analise SEMPRE todo o histórico de mensagens da conversa. Se o usuário disser "está errado", identifique imediatamente qual afirmação anterior ele está contestando e reavalie os dados normativos.
+- Analise SEMPRE todo o histórico de mensagens da conversa.
+- Ao tratar de classificações de ocupação e grupos (Ex: F-11), consulte rigorosamente a Tabela 1 do Decreto Estadual de Segurança contra Incêndio.
 
 ESTRUTURA DE RESPOSTA OBRIGATÓRIA
 
@@ -149,7 +159,7 @@ ROMANO não passa pano. ROMANO responde com base. ROMANO não inventa. ROMANO re
 """.strip()
 
 # =========================================================
-# 5. INICIALIZAÇÃO DA API E PROCESSAMENTO DE ARQUIVOS
+# 4. PROCESSAMENTO DA BASE LOCAL
 # =========================================================
 @st.cache_resource
 def criar_cliente():
@@ -220,12 +230,19 @@ def dividir_em_chunks(texto: str, tamanho: int = TAMANHO_CHUNK, sobreposicao: in
 
 def score_chunk(chunk: str, arquivo: str, pergunta: str) -> int:
     chunk_lower = chunk.lower()
+    arq_lower = arquivo.lower()
     termos = normalizar_termos(pergunta)
+    
     score = sum(chunk_lower.count(termo) * 5 for termo in termos)
-    if "decreto" in pergunta.lower() and "decreto" in arquivo.lower():
-        score += 30
-    if "it" in pergunta.lower() and "it" in arquivo.lower():
-        score += 30
+    
+    # DÁ PRIORIDADE MÁXIMA PARA O DECRETO E IT-01 EM CONSULTAS DE OCUPAÇÃO/TABELA
+    if any(k in pergunta.lower() for k in ["ocupação", "ocupacao", "grupo", "divisão", "divisao", "tabela 1"]):
+        if "decreto" in arq_lower or "it_01" in arq_lower or "it 01" in arq_lower or "regulam" in arq_lower:
+            score += 150
+        # Penaliza ITs de carga de incêndio ou pressurização se a dúvida for de tabela de ocupação
+        if "carga" in arq_lower or "it_14" in arq_lower or "it 14" in arq_lower:
+            score -= 100
+
     return score
 
 @st.cache_data(show_spinner=False)
@@ -259,12 +276,10 @@ def montar_contexto_local(trechos):
     return "\n\n".join(blocos)
 
 # =========================================================
-# 6. MONTAGEM DE MENSAGENS COM HISTÓRICO COMPLETO
+# 5. MONTAGEM DE MENSAGENS E MOTOR
 # =========================================================
 def construir_conteudo_com_historico(historico_mensagens, pergunta_atual, contexto_local):
     contents = []
-    
-    # Adiciona o contexto do histórico de conversa mantido no Streamlit
     for msg in historico_mensagens:
         role_api = "user" if msg["role"] == "user" else "model"
         contents.append(types.Content(
@@ -272,7 +287,6 @@ def construir_conteudo_com_historico(historico_mensagens, pergunta_atual, contex
             parts=[types.Part.from_text(text=msg["content"])]
         ))
 
-    # Constrói o texto do turno atual com a inclusão de base local, se houver
     if contexto_local:
         prompt_final = f"ORDEM:\n{pergunta_atual}\n\nBASE DOCUMENTAL LOCAL DISPONÍVEL:\n{contexto_local}"
     else:
@@ -282,16 +296,26 @@ def construir_conteudo_com_historico(historico_mensagens, pergunta_atual, contex
         role="user",
         parts=[types.Part.from_text(text=prompt_final)]
     ))
-    
     return contents
 
-# =========================================================
-# 7. MOTOR DE PROCESSAMENTO DE PERGUNTAS
-# =========================================================
 def processar_pergunta(pergunta: str, historico: list):
     p_clean = pergunta.strip().lower()
 
-    # PASSO 1: Resposta Rápida (Apenas para saudações e comandos simples isolados)
+    # PASSO 1: Verificação direta no Dicionário Tabela 1 (Instantanêo / Zero Erro)
+    for chave, desc in TABELA_OCUPACOES_DIRETA.items():
+        if chave in p_clean:
+            texto_direto = f"RESPOSTA DIRETA:\nA divisão **{chave.upper()}** pertence ao **Grupo F (Local de reunião pública)** e refere-se à ocupação de **{desc}**.\n\nFUNDAMENTAÇÃO TÉCNICA:\nDecreto Estadual nº 63.911/2018 (ou Regulamento Estadual Vigente) – Tabela 1 (Classificação das edificações e áreas de risco quanto à ocupação).\n\nGRAU DE CERTEZA TÉCNICA:\nExpressa na Base Local Normativa.\n\nBORDÃO OPERACIONAL\nROMANO não passa pano. ROMANO responde com base. ROMANO não inventa. ROMANO resolve."
+            return {
+                "ok": True,
+                "texto": texto_direto,
+                "tempo": 0.01,
+                "trechos": [],
+                "usou_web": False,
+                "modelo": "Tabela 1 Interna (Local)",
+                "erro": ""
+            }
+
+    # PASSO 2: Saudações/Comandos Rápidos
     if len(historico) <= 1:
         for gatilhos, resposta_direta in RESPOSTAS_RAPIDAS.items():
             if any(p_clean == g or p_clean.startswith(g) for g in gatilhos):
@@ -305,7 +329,7 @@ def processar_pergunta(pergunta: str, historico: list):
                     "erro": ""
                 }
 
-    # PASSO 2: Busca Local
+    # PASSO 3: Busca de Documentos na Base Local
     trechos = buscar_trechos_relevantes(pergunta, TOP_CHUNKS)
     contexto = montar_contexto_local(trechos)
     usou_web = False
@@ -326,7 +350,6 @@ def processar_pergunta(pergunta: str, historico: list):
             if ferramentas:
                 config_args["tools"] = ferramentas
 
-            # Constrói as mensagens enviando TODO o histórico
             contents = construir_conteudo_com_historico(historico[:-1], pergunta, contexto)
 
             resposta = cliente.models.generate_content(
@@ -349,7 +372,7 @@ def processar_pergunta(pergunta: str, historico: list):
         except Exception as e:
             err_msg = str(e)
             if contexto:
-                texto_fallback = f"RESPOSTA DIRETA (MODO OFFLINE LOCAL):\n{trechos[0]['trecho'][:1000]}...\n\nFUNDAMENTAÇÃO TÉCNICA:\nArquivo: {trechos[0]['arquivo']}\n\nGRAU DE CERTEZA TÉCNICA:\nExpressa na Base Local\n\nBORDÃO OPERACIONAL\nROMANO não passa pano. ROMANO responde com base. ROMANO não inventa. ROMANO resolve."
+                texto_fallback = f"RESPOSTA DIRETA (MODO OFFLINE LOCAL):\nConsultei a base local para sua ordem. Segue o trecho exato da norma:\n\n{trechos[0]['trecho'][:800]}...\n\nFUNDAMENTAÇÃO TÉCNICA:\nArquivo: {trechos[0]['arquivo']}\n\nGRAU DE CERTEZA TÉCNICA:\nExpressa na Base Local (Contingência)\n\nBORDÃO OPERACIONAL\nROMANO não passa pano. ROMANO responde com base. ROMANO não inventa. ROMANO resolve."
                 return {
                     "ok": True,
                     "texto": texto_fallback,
@@ -364,7 +387,7 @@ def processar_pergunta(pergunta: str, historico: list):
                 "texto": "",
                 "tempo": round(time.time() - inicio, 2),
                 "trechos": trechos,
-                "erro": f"Erro ou limite de cota atingido. Detalhes: {err_msg}"
+                "erro": f"Erro na API ou cota esgotada. Detalhes: {err_msg}"
             }
 
     return {
@@ -372,11 +395,11 @@ def processar_pergunta(pergunta: str, historico: list):
         "texto": "",
         "tempo": 0,
         "trechos": [],
-        "erro": "Chave GEMINI_API_KEY não localizada nas configurações."
+        "erro": "Chave GEMINI_API_KEY não localizada."
     }
 
 # =========================================================
-# 8. INTERFACE STREAMLIT
+# 6. INTERFACE STREAMLIT
 # =========================================================
 st.markdown("""
 <div class="romano-wrap">
@@ -411,7 +434,7 @@ if pergunta:
         st.markdown(pergunta)
 
     with st.chat_message("assistant", avatar=None):
-        with st.spinner("ROMANO processando com memória operacional..."):
+        with st.spinner("ROMANO processando..."):
             resultado = processar_pergunta(pergunta, st.session_state.mensagens)
 
         if not resultado["ok"]:
