@@ -78,13 +78,13 @@ html, body, .stApp, [data-testid="stAppViewContainer"] {
 """, unsafe_allow_html=True)
 
 # =========================================================
-# 2. CONFIGURAÇÕES GERAIS E MODELOS
+# 2. CONFIGURAÇÕES GERAIS E MODELOS ATUALIZADOS
 # =========================================================
 BASE_CONHECIMENTO_DIR = "base_conhecimento"
 ARQUIVOS_SUPORTADOS = (".txt", ".pdf")
 
-MODELO_PRINCIPAL = "gemini-2.5-flash"
-MODELO_FALLBACK = "gemini-2.0-flash"
+MODELO_PRINCIPAL = "gemini-3.6-flash"
+MODELO_FALLBACK = "gemini-3.6-flash"
 
 TAMANHO_CHUNK = 1800
 SOBREPOSICAO_CHUNK = 250
@@ -302,13 +302,11 @@ def gerar_resposta(pergunta: str):
     trechos = buscar_trechos_na_base(pergunta, TOP_CHUNKS)
     usou_web = False
 
-    # Define se usa base local ou ativa a busca na web
     if trechos:
         contexto = montar_contexto(trechos)
         prompt_usuario = f"PERGUNTA DO USUÁRIO:\n{pergunta}\n\nBASE LOCAL LOCALIZADA:\n{contexto}"
         ferramentas = []
     else:
-        # Quando a base local não possui dados, ativa a ferramenta de busca do Google
         prompt_usuario = f"PERGUNTA DO USUÁRIO:\n{pergunta}\n\nA informação não foi encontrada na base local. Realize uma busca na internet para responder categoricamente."
         ferramentas = [{"google_search": {}}]
         usou_web = True
@@ -377,7 +375,6 @@ with st.sidebar:
 if "mensagens" not in st.session_state:
     st.session_state.mensagens = []
 
-# Exibe histórico do chat
 for msg in st.session_state.mensagens:
     with st.chat_message(msg["role"], avatar=None):
         st.markdown(msg["content"])
@@ -385,7 +382,6 @@ for msg in st.session_state.mensagens:
             with st.expander("Diagnóstico Técnico", expanded=False):
                 st.markdown(f'<div class="debug-box">{msg["debug"]}</div>', unsafe_allow_html=True)
 
-# Campo de entrada nativo do Streamlit (Visível no mobile)
 pergunta = st.chat_input("Digite sua ordem...")
 
 if pergunta:
