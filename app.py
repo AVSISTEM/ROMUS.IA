@@ -4,13 +4,24 @@ from google import genai
 from google.genai import types
 
 # ==============================================================================
-# 1. CONFIGURAÇÃO DA PÁGINA STREAMLIT
+# 1. CONFIGURAÇÃO DA PÁGINA STREAMLIT & ESTILO ESCURO (iOS FIX)
 # ==============================================================================
 st.set_page_config(
     page_title="ROMUS.IA",
-    page_icon="🔥",
     layout="wide"
 )
+
+# CSS personalizado para remover fundo branco na barra do teclado e ajustar visual
+st.markdown("""
+    <style>
+    /* Força o fundo escuro na barra de digitação para não abrir faixa branca no mobile */
+    .stChatInputContainer, div[data-testid="stChatInput"] {
+        background-color: #0e1117 !important;
+    }
+    footer {visibility: hidden;}
+    header {visibility: hidden;}
+    </style>
+""", unsafe_allow_html=True)
 
 st.title("ROMUS.IA")
 st.caption("Inteligência artificial técnica e objetiva.")
@@ -56,7 +67,7 @@ def buscar_na_base_dados(pergunta):
     return "\n".join(evidencias_exemplo)
 
 # ==============================================================================
-# 5. FUNÇÃO DE GERAÇÃO DE RESPOSTA
+# 5. FUNÇÃO DE GERAÇÃO DE RESPOSTA (MODELO CORRIGIDO)
 # ==============================================================================
 def gerar_resposta_romus(pergunta, evidencias, pesquisar_web):
     contexto_str = f"EVIDÊNCIAS ENCONTRADAS NA BASE DE DADOS:\n{evidencias}\n\n"
@@ -66,6 +77,7 @@ def gerar_resposta_romus(pergunta, evidencias, pesquisar_web):
     prompt_final = f"{contexto_str}PERGUNTA DO USUÁRIO:\n{pergunta}"
 
     try:
+        # Modelo atualizado conforme exigido pela API
         resposta = cliente.models.generate_content(
             model="gemini-2.5-flash",
             contents=prompt_final,
@@ -87,9 +99,9 @@ def gerar_resposta_romus(pergunta, evidencias, pesquisar_web):
 if "mensagens" not in st.session_state:
     st.session_state.mensagens = []
 
-# Exibe as mensagens do histórico na tela
+# Exibe as mensagens do histórico na tela (SEM CARINHAS/AVATARES)
 for msg in st.session_state.mensagens:
-    with st.chat_message(msg["role"]):
+    with st.chat_message(msg["role"], avatar=""):
         st.markdown(msg["content"])
 
 # Opção de controle no topo/sidebar
@@ -105,14 +117,14 @@ with st.sidebar:
 pergunta = st.chat_input("Digite sua pergunta técnica...")
 
 if pergunta:
-    # Registra e exibe a mensagem do usuário
+    # Registra e exibe a mensagem do usuário (sem ícone)
     st.session_state.mensagens.append({"role": "user", "content": pergunta})
-    with st.chat_message("user"):
+    with st.chat_message("user", avatar=""):
         st.markdown(pergunta)
 
-    # Processa e exibe a resposta do assistente
-    with st.chat_message("assistant"):
-        with st.spinner("Analisando normas e processando resposta..."):
+    # Processa e exibe a resposta do assistente (sem ícone)
+    with st.chat_message("assistant", avatar=""):
+        with st.spinner("Analisando normas..."):
             evidencias = buscar_na_base_dados(pergunta)
             resposta = gerar_resposta_romus(pergunta, evidencias, pesquisar_web)
             st.markdown(resposta)
