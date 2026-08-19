@@ -1,7 +1,7 @@
+import os
 import streamlit as st
 from google import genai
 from google.genai import types
-import os
 
 # ==============================================================================
 # 1. CONFIGURAÇÃO DA PÁGINA STREAMLIT
@@ -18,27 +18,28 @@ st.caption("Inteligência artificial técnica e objetiva.")
 # ==============================================================================
 # 2. CONFIGURAÇÃO DA API DO GEMINI
 # ==============================================================================
-api_key = os.getenv("GEMINI_API_KEY") or st.secrets.get("GEMINI_API_KEY", "")
+chave_api = os.getenv("GEMINI_API_KEY") or st.secrets.get("GEMINI_API_KEY", "")
 
-if not api_key:
+if not chave_api:
     st.error("Chave de API (GEMINI_API_KEY) não configurada. Configure em Secrets do Streamlit ou Variáveis de Ambiente.")
     st.stop()
 
-# Inicializa o cliente oficial da nova SDK
-client = genai.Client(api_key=api_key)
+# Inicializa o cliente oficial
+cliente = genai.Client(api_key=chave_api)
 
 # ==============================================================================
-# 3. PROMPT DO SISTEMA (ROMUS.IA)
+# 3. PROMPT DO SISTEMA (ROMUS.IA) - OTIMIZADO PARA SÍNTESE E INTELIGÊNCIA
 # ==============================================================================
-SYSTEM_PROMPT = """Você é o assistente técnico especializado ROMUS.IA, voltado para engenharia de segurança contra incêndio e normas técnicas de edificações.
+PROMPT_DO_SISTEMA = """Você é o ROMUS.IA, assistente técnico sênior em Engenharia de Segurança Contra Incêndio e Normas Técnicas.
 
-INSTRUÇÕES DE RESPOSTA:
-1. Analise cuidadosamente o contexto e as evidências fornecidas.
-2. Seja direto, técnico, objetivo e preciso em suas respostas.
-3. Se a pergunta envolver cálculos (ex: Unidades de Passagem - UP, largura mínima de saída, dimensionamento de lotação), apresente o cálculo passo a passo, a fórmula utilizada e os valores finais.
-4. Responda fundamentando com base no texto das evidências encontradas.
-5. Se o texto da evidência for suficiente para responder parcialmente ou totalmente, gere a resposta completa e detalhada sem emitir mensagens de erro ou de recusa.
-6. Nunca decline a resposta se houver dados mínimos no contexto ou se a opção de busca complementar estiver habilitada.
+DIRETRIZES DE RESPOSTA (SÍNTESE & INTELIGÊNCIA):
+1. SEJA EXTREMAMENTE CONCISO: Responda de forma direta, eliminando saudações, introduções e conclusões genéricas. Vá direto ao ponto técnico.
+2. ESTRUTURA SECCIONADA:
+   - **Conclusão Técnico-Normativa**: A resposta direta em 1 ou 2 frases em negrito.
+   - **Dimensionamento / Cálculo**: Se houver cálculo, exiba a fórmula, os valores aplicados e o resultado de forma esquemática (1 linha por etapa).
+   - **Base Legal / Embasamento**: Apresente apenas a norma (Ex: IT-11, NBR 9077) e o item específico consultado em formato de tópicos (bullet points).
+3. FORMATAÇÃO: Use tabelas para comparações ou múltiplos dados. Destaque valores numéricos cruciais em negrito.
+4. LINGUAGEM: Utilize terminologia técnica precisa, sem floreios explicativos ou teorias.
 """
 
 # ==============================================================================
@@ -48,41 +49,40 @@ def buscar_na_base_dados(pergunta):
     evidencias_exemplo = [
         "Instrução Técnica / Norma de Saídas de Emergência em Edificações:",
         "- Grupo F-11: Locais de reunião de público / centros de convenções / recintos de exposições.",
-        "- Cálculo de Unidades de Passagem (N): N = P / C, onde P é a população e C é a capacidade do acesso/escada.",
+        "- Cálculo de Unidades de Passagem (N): N = P/C, onde P é a população e C é a capacidade do acesso/escada.",
         "- Para saídas e acessos em edifícios do Grupo F: Capacidade de passagem C = 100 pessoas por unidade de passagem (UP).",
         "- Largura da saída: N x 0,55m. A largura mínima recomendada para acessos/portas em saídas de emergência é de 1,10m (2 UPs)."
     ]
     return "\n".join(evidencias_exemplo)
 
 # ==============================================================================
-# 5. FUNÇÃO DE GERAÇÃO DE RESPOSTA (MODELO GEMINI-3.6-FLASH)
+# 5. FUNÇÃO DE GERAÇÃO DE RESPOSTA
 # ==============================================================================
 def gerar_resposta_romus(pergunta, evidencias, pesquisar_web):
     contexto_str = f"EVIDÊNCIAS ENCONTRADAS NA BASE DE DADOS:\n{evidencias}\n\n"
     if pesquisar_web:
-        contexto_str += "NOTA: Se as evidências acima forem parciais, utilize também seu conhecimento técnico geral para complementar a resposta com precisão.\n\n"
+        contexto_str += "NOTA: Se as evidências acima forem parciais, utilize também seu conhecimento técnico geral para complementar a resposta com soluções.\n\n"
 
     prompt_final = f"{contexto_str}PERGUNTA DO USUÁRIO:\n{pergunta}"
 
     try:
-        # Chamada atualizada com o modelo gemini-3.6-flash
-        response = client.models.generate_content(
-            model="gemini-3.6-flash",
+        resposta = cliente.models.generate_content(
+            model="gemini-2.5-flash",
             contents=prompt_final,
             config=types.GenerateContentConfig(
-                system_instruction=SYSTEM_PROMPT,
-                temperature=0.2,
+                system_instruction=PROMPT_DO_SISTEMA,
+                temperature=0.0,
             ),
         )
-        if response.text and response.text.strip():
-            return response.text
+        if resposta.text and resposta.text.strip():
+            return resposta.text
         else:
             return "O mecanismo processou o pedido, mas a resposta retornou vazia. Tente reformular a pergunta."
     except Exception as e:
         return f"Erro na comunicação com a IA: {str(e)}"
 
 # ==============================================================================
-# 6. INTERFACE DE USUÁRIO (STREAMLIT UI)
+# 6. INTERFACE DO USUÁRIO (STREAMLIT UI)
 # ==============================================================================
 pergunta = st.text_area(
     "Digite sua pergunta:",
