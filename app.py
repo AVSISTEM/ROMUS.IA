@@ -1,8 +1,8 @@
 import os
 import re
+import unicodedata
 import streamlit as st
 
-# Tenta usar pdfplumber para preservar formatação de tabelas; fallback para pypdf
 try:
     import pdfplumber
     HAS_PDFPLUMBER = True
@@ -11,12 +11,12 @@ except ImportError:
     HAS_PDFPLUMBER = False
 
 # =========================================================
-# 1. CONFIGURAÇÃO DA PÁGINA E INTERFACE
+# 1. CONFIGURAÇÃO DA PÁGINA
 # =========================================================
 st.set_page_config(
     page_title="ROMANO - Buscador Normativo",
     layout="wide",
-    initial_sidebar_state="collapsed"
+    initial_sidebar_state="expanded"
 )
 
 st.markdown("""
@@ -38,8 +38,16 @@ html, body, .stApp { background-color: #0e1117 !important; color: #f0f6fc !impor
 BASE_CONHECIMENTO_DIR = "base_conhecimento"
 
 # =========================================================
-# 2. EXTRATOR DE TEXTO E INDEXADOR LOCAL
+# 2. FUNÇÕES DE NORMALIZAÇÃO DE TEXTO
 # =========================================================
+def normalizar(texto: str) -> str:
+    if not texto:
+        return ""
+    # Remove acentos e converte para minúsculas
+    nfkd = unicodedata.normalize('NFD', texto)
+    texto_sem_acento = "".join([c for c in nfkd if unicodedata.category(c) != 'Mn'])
+    return re.sub(r'[^a-zA-Z0-9\s-]', ' ', texto_sem_acento).lower().strip()
+
 def extrair_texto_pdf(caminho_pdf: str) -> str:
     partes = []
     try:
@@ -62,8 +70,10 @@ def extrair_texto_pdf(caminho_pdf: str) -> str:
 @st.cache_data(show_spinner=False)
 def carregar_base_conhecimento():
     base_dados = []
+    arquivos_lidos = 0
+    
     if not os.path.exists(BASE_CONHECIMENTO_DIR):
-        return base_dados
+        return base_dados, 0
 
     for raiz, _, arquivos in os.walk(BASE_CONHECIMENTO_DIR):
         for arquivo in arquivos:
@@ -79,49 +89,61 @@ def carregar_base_conhecimento():
                 texto = extrair_texto_pdf(caminho)
 
             if texto:
-                # Quebra em blocos por parágrafo ou tabela (quebras duplas)
-                blocos = [b.strip() for b in texto.split("\n\n") if len(b.strip()) > 30]
-                for idx, bloco in enumerate(blocos):
-                    base_dados.append({
-                        "arquivo": nome_relativo,
-                        "bloco_id": idx + 1,
-                        "texto": bloco
-                    })
-    return base_dados
+                arquivos_lidos += 1
+                # Quebra em blocos menores (janelas de 800 caracteres)
+                linhas = texto.split("\n")
+                bloco_atual = []
+                tamanho_atual = 0
+
+                for linha in linhas:
+                    bloco_atual.append(linha)
+                    tamanho_atual += len(linha)
+                    if tamanho_atual >= 800:
+                        conteudo_bloco = "\n".join(bloco_atual).strip()
+                        if conteudo_bloco:
+                            base_dados.append({
+                                "arquivo": nome_relativo,
+                                "texto": conteudo_bloco,
+                                "texto_norm": normalizar(conteudo_bloco)
+                            })
+                        bloco_atual = []
+                        tamanho_atual = 0
+
+                if bloco_atual:
+                    conteudo_bloco = "\n".join(bloco_atual).strip()
+                    if conteudo_bloco:
+                        base_dados.append({
+                            "arquivo": nome_relativo,
+                            "texto": conteudo_bloco,
+                            "texto_norm": normalizar(conteudo_bloco)
+                        })
+
+    return base_dados, arquivos_lidos
 
 # =========================================================
-# 3. MOTOR DE BUSCA ALGORÍTMICO (SEM IA)
+# 3. MOTOR DE BUSCA ALGORÍTMICO MEJORADO
 # =========================================================
 def buscar_na_base(termo: str):
-    base = carregar_base_conhecimento()
+    base, _ = carregar_base_conhecimento()
     if not base:
         return []
 
-    termo_limpo = termo.lower().strip()
-    tokens = re.findall(r'\b\w+\b', termo_limpo)
+    termo_norm = normalizar(termo)
+    tokens = [t for t in termo_norm.split() if len(t) > 2]
     
-    # Identifica ocupação específica tipo F-11, A-1, C-2
-    match_grupo = re.search(r'\b[a-m]-\d+\b', termo_limpo)
-    grupo_procurado = match_grupo.group(0) if match_grupo else None
-
     resultados = []
     for item in base:
-        texto_lower = item["texto"].lower()
         score = 0
+        texto_norm = item["texto_norm"]
 
-        # Regra 1: Correspondência exata da ocupação (Ex: F-11)
-        if grupo_procurado and grupo_procurado in texto_lower:
-            score += 200
+        # Busca por tokens da consulta
+        for token in tokens:
+            if token in texto_norm:
+                score += texto_norm.count(token) * 10
 
-        # Regra 2: Contagem de palavras digitadas
-        for t in tokens:
-            if len(t) > 2 and t in texto_lower:
-                score += texto_lower.count(t) * 10
-
-        # Regra 3: Bônus se contiver termos de tabela/norma
-        if any(k in termo_limpo for k in ["medidas", "exigencias", "exigências", "m2", "m²", "lotação"]):
-            if any(tabelak in texto_lower for tabelak in ["tabela", "medida", "exigência", "existente"]):
-                score += 30
+        # Bônus para termos compostos exatos
+        if termo_norm in texto_norm:
+            score += 100
 
         if score > 0:
             resultados.append({
@@ -130,7 +152,6 @@ def buscar_na_base(termo: str):
                 "score": score
             })
 
-    # Ordena pelos trechos de maior relevância
     resultados.sort(key=lambda x: x["score"], reverse=True)
     return resultados[:15]
 
@@ -145,20 +166,30 @@ st.markdown("""
 </div>
 """, unsafe_allow_html=True)
 
-query = st.chat_input("Digite a ocupação, norma ou parâmetro (ex: F-11, 250m2, tabela)...")
+base_indexada, total_pdfs = carregar_base_conhecimento()
+
+with st.sidebar:
+    st.subheader("Status da Base Local")
+    st.info(f"PDFs/TXTs Lidos: **{total_pdfs}**")
+    st.info(f"Blocos de Texto: **{len(base_indexada)}**")
+    if st.button("Recarregar Base", use_container_width=True):
+        st.cache_data.clear()
+        st.rerun()
+
+query = st.chat_input("Digite sua consulta (ex: largura escada, F-11, extintores)...")
 
 if query:
     st.markdown(f"**Consulta:** `{query}`")
     resultados = buscar_na_base(query)
 
     if not resultados:
-        st.warning("Nenhum trecho correspondente foi localizado na pasta 'base_conhecimento'.")
+        st.error(f"Nenhum resultado encontrado para '{query}'. Verifique se o termo consta nos documentos locais ou consulte o painel lateral.")
     else:
-        st.success(f"{len(resultados)} trechos relevantes localizados na base local.")
+        st.success(f"{len(resultados)} trechos relevantes localizados.")
         for r in resultados:
             st.markdown(f"""
             <div class="resultado-card">
-                <div class="fonte-header">📄 Arquivo: {r['arquivo']} (Relevância: {r['score']})</div>
+                <div class="fonte-header">📄 Arquivo: {r['arquivo']} (Pontuação: {r['score']})</div>
                 <div class="trecho-texto">{r['texto']}</div>
             </div>
             """, unsafe_allow_html=True)
