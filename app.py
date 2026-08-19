@@ -7,7 +7,7 @@ from google.genai import types
 from pypdf import PdfReader
 
 # =========================================================
-# 1. CONFIGURAÇÃO DA PÁGINA E CSS TEMA ESCURO (iOS FIX)
+# 1. CONFIGURAÇÃO DA PÁGINA E CSS ESCURO (OPTIMIZADO iOS)
 # =========================================================
 st.set_page_config(
     page_title="ROMANO - IA Técnica",
@@ -87,36 +87,48 @@ html, body, .stApp, [data-testid="stAppViewContainer"], [data-testid="stBottom"]
 """, unsafe_allow_html=True)
 
 # =========================================================
-# 2. CONFIGURAÇÕES OTIMIZADAS PARA ECONOMIA DE COTAS
+# 2. CONFIGURAÇÃO DE MODELOS E BASE LOCAL
 # =========================================================
 BASE_CONHECIMENTO_DIR = "base_conhecimento"
 ARQUIVOS_SUPORTADOS = (".txt", ".pdf")
 
-# Modelos para rodízio e fallback
-MODELOS = ["gemini-3.6-flash", "gemini-2.5-flash", "gemini-1.5-flash"]
+# Modelo Oficial Ativo
+MODELO_UNICO = "gemini-3.6-flash"
 
-# Otimização de tamanho para evitar erro de limite de Tokens/Minuto
-TAMANHO_CHUNK = 1200
-SOBREPOSICAO_CHUNK = 150
-TOP_CHUNKS = 6
+TAMANHO_CHUNK = 1500
+SOBREPOSICAO_CHUNK = 200
+TOP_CHUNKS = 8
 
 PALAVRAS_IGNORADAS = {
     "a", "o", "e", "de", "da", "do", "das", "dos", "um", "uma",
     "em", "por", "para", "com", "sem", "que", "como", "qual",
     "quais", "onde", "quando", "isso", "essa", "esse", "sobre",
-    "as", "os", "ao", "aos", "na", "no", "nas", "nos",
-    "bom", "boa", "dia", "tarde", "noite", "oi", "ola", "olá"
+    "as", "os", "ao", "aos", "na", "no", "nas", "nos"
 }
 
 # =========================================================
-# 3. PROMPT OTIMIZADO (SISTEMA ROMANO)
+# 3. BASE DE RESPOSTAS RÁPIDAS E LOCAIS (ZERO CONSUMO DE API)
+# =========================================================
+RESPOSTAS_RAPIDAS = {
+    ("oi", "olá", "ola", "bom dia", "boa tarde", "boa noite", "comandante"): 
+        "RESPOSTA DIRETA:\nPronto para o serviço, Comandante. Envie a ordem ou consulta técnica.\n\nFUNDAMENTAÇÃO TÉCNICA:\nSistema Operacional ROMANO v3.6.\n\nGRAU DE CERTEZA TÉCNICA:\nAtivo e Local.\n\nBORDÃO OPERACIONAL\nROMANO não passa pano. ROMANO responde com base. ROMANO não inventa. ROMANO resolve.",
+    
+    ("quem é você", "quem e voce", "quem e você", "o que você faz", "quais suas funcoes"): 
+        "RESPOSTA DIRETA:\nSou o ROMANO, uma Inteligência Artificial técnica, objetiva e analítica voltada para legislação, normas e engenharia de segurança.\n\nFUNDAMENTAÇÃO TÉCNICA:\nArquitetura Híbrida de Consulta Local e Raciocínio Normativo.\n\nGRAU DE CERTEZA TÉCNICA:\nModulo Principal.\n\nBORDÃO OPERACIONAL\nROMANO não passa pano. ROMANO responde com base. ROMANO não inventa. ROMANO resolve.",
+    
+    ("slogan", "bordao", "bordão", "qual seu bordao"): 
+        "RESPOSTA DIRETA:\nROMANO não passa pano. ROMANO responde com base. ROMANO não inventa. ROMANO resolve.\n\nFUNDAMENTAÇÃO TÉCNICA:\nDiretriz de Identidade Corporativa.\n\nGRAU DE CERTEZA TÉCNICA:\nIncondicional."
+}
+
+# =========================================================
+# 4. PROMPT DO SISTEMA
 # =========================================================
 PROMPT_SISTEMA = """
 Você é o ROMANO, uma inteligência artificial autônoma, técnica e objetiva.
 
 DIRETRIZES
 - Slogan: "A IA que não passa pano. ROMANO responde com base. ROMANO não inventa. ROMANO resolve."
-- Responda diretamente ao que foi solicitado, de forma concisa e sem saudações banais.
+- Responda diretamente ao que foi solicitado, de forma extremamente técnica, concisa e sem enrolação.
 
 ESTRUTURA DE RESPOSTA OBRIGATÓRIA
 
@@ -130,25 +142,22 @@ GRAU DE CERTEZA TÉCNICA:
 [Expressa na Base Local / Obtida via Busca Web]
 
 OBSERVAÇÃO OPERACIONAL:
-[Se necessário]
+[Apenas se estritamente necessário]
 
 BORDÃO OPERACIONAL
 ROMANO não passa pano. ROMANO responde com base. ROMANO não inventa. ROMANO resolve.
 """.strip()
 
 # =========================================================
-# 4. INICIALIZAÇÃO DO CLIENTE GEMINI
+# 5. INICIALIZAÇÃO DA API E PROCESSAMENTO DE ARQUIVOS
 # =========================================================
 @st.cache_resource
 def criar_cliente():
     api_key = os.getenv("GEMINI_API_KEY") or st.secrets.get("GEMINI_API_KEY", "")
     if not api_key:
-        raise ValueError("A chave GEMINI_API_KEY não foi configurada.")
+        return None
     return genai.Client(api_key=api_key)
 
-# =========================================================
-# 5. BASE LOCAL E BUSCA DE TRECHOS
-# =========================================================
 def extrair_texto_txt(caminho_txt: str) -> str:
     try:
         with open(caminho_txt, "r", encoding="utf-8", errors="ignore") as f:
@@ -215,6 +224,8 @@ def score_chunk(chunk: str, arquivo: str, pergunta: str) -> int:
     score = sum(chunk_lower.count(termo) * 5 for termo in termos)
     if "decreto" in pergunta.lower() and "decreto" in arquivo.lower():
         score += 30
+    if "it" in pergunta.lower() and "it" in arquivo.lower():
+        score += 30
     return score
 
 @st.cache_data(show_spinner=False)
@@ -244,35 +255,47 @@ def buscar_trechos_relevantes(pergunta: str, top_chunks: int = TOP_CHUNKS):
 def montar_contexto_local(trechos):
     if not trechos:
         return ""
-    blocos = [f"--- DOC {i} ({item['arquivo']}) ---\n{item['trecho']}" for i, item in enumerate(trechos, start=1)]
+    blocos = [f"--- DOCUMENTO LOCAL ({item['arquivo']}) ---\n{item['trecho']}" for item in trechos]
     return "\n\n".join(blocos)
 
 # =========================================================
-# 6. PROCESSAMENTO COM FALLBACK DE COTAS
+# 6. MOTOR DE DECISÃO INTELIGENTE E LOCAL (SEM DEPENDER DE INTERNET)
 # =========================================================
 def processar_pergunta(pergunta: str):
-    try:
-        cliente = criar_cliente()
-    except Exception as e:
-        return {"ok": False, "texto": "", "tempo": 0, "trechos": [], "erro": str(e)}
+    p_clean = pergunta.strip().lower()
 
+    # PASSO 1: Resposta Rápida Direta no Python (Consumo Cero / Ultra-rápido)
+    for gatilhos, resposta_direta in RESPOSTAS_RAPIDAS.items():
+        if any(p_clean == g or p_clean.startswith(g) for g in gatilhos):
+            return {
+                "ok": True,
+                "texto": resposta_direta,
+                "tempo": 0.01,
+                "trechos": [],
+                "usou_web": False,
+                "modelo": "Cache Interno Local",
+                "erro": ""
+            }
+
+    # PASSO 2: Busca de Documentos no Banco de Dados Local
     trechos = buscar_trechos_relevantes(pergunta, TOP_CHUNKS)
     contexto = montar_contexto_local(trechos)
     usou_web = False
 
+    # PASSO 3: Tentativa de Comunicação com a API
+    cliente = criar_cliente()
+    
     if contexto:
-        prompt_usuario = f"ORDEM:\n{pergunta}\n\nBASE LOCAL:\n{contexto}"
+        prompt_usuario = f"ORDEM:\n{pergunta}\n\nBASE DOCUMENTAL LOCAL:\n{contexto}"
         ferramentas = None
     else:
-        prompt_usuario = f"ORDEM:\n{pergunta}\n\nSem base local. Busque na web."
+        prompt_usuario = f"ORDEM:\n{pergunta}\n\nSem base local para o termo. Realize busca externa para responder."
         ferramentas = [{"google_search": {}}]
         usou_web = True
 
     inicio = time.time()
-    ultimo_erro = ""
 
-    # Tentativas alternando modelos em caso de erro 429
-    for modelo in MODELOS:
+    if cliente:
         try:
             config_args = {
                 "system_instruction": PROMPT_SISTEMA,
@@ -282,7 +305,7 @@ def processar_pergunta(pergunta: str):
                 config_args["tools"] = ferramentas
 
             resposta = cliente.models.generate_content(
-                model=modelo,
+                model=MODELO_UNICO,
                 contents=prompt_usuario,
                 config=types.GenerateContentConfig(**config_args)
             )
@@ -295,23 +318,49 @@ def processar_pergunta(pergunta: str):
                 "tempo": tempo,
                 "trechos": trechos,
                 "usou_web": usou_web,
-                "modelo": modelo,
+                "modelo": MODELO_UNICO,
                 "erro": ""
             }
         except Exception as e:
-            ultimo_erro = str(e)
-            if "429" in ultimo_erro or "RESOURCE_EXHAUSTED" in ultimo_erro:
-                time.sleep(2)  # Pausa antes do fallback
-                continue
-            else:
-                break
+            err_msg = str(e)
+            # FALLBACK DE SEGURANÇA: Se a cota da API falhar, mas temos a base local, responde direto do banco local sem derrubar a aplicação
+            if contexto:
+                texto_fallback = f"RESPOSTA DIRETA (MODO OFFLINE LOCAL):\nEncontrada correspondência direta no banco de dados local para sua consulta.\n\nTRECHO LOCALIZADO:\n{trechos[0]['trecho'][:1000]}...\n\nFUNDAMENTAÇÃO TÉCNICA:\nArquivo: {trechos[0]['arquivo']}\n\nGRAU DE CERTEZA TÉCNICA:\nExpressa na Base Local (Modo Contingência Off-line)\n\nBORDÃO OPERACIONAL\nROMANO não passa pano. ROMANO responde com base. ROMANO não inventa. ROMANO resolve."
+                return {
+                    "ok": True,
+                    "texto": texto_fallback,
+                    "tempo": round(time.time() - inicio, 2),
+                    "trechos": trechos,
+                    "usou_web": False,
+                    "modelo": "Banco Local (Modo Off-line)",
+                    "erro": ""
+                }
+            return {
+                "ok": False,
+                "texto": "",
+                "tempo": round(time.time() - inicio, 2),
+                "trechos": trechos,
+                "erro": f"Cota de API temporariamente excedida e sem correspondência exata local. Aguarde 1 minuto. Detalhes: {err_msg}"
+            }
+
+    # Se a API nem foi inicializada
+    if contexto:
+        return {
+            "ok": True,
+            "texto": f"RESPOSTA DIRETA (BASE LOCAL):\n{trechos[0]['trecho'][:1000]}\n\nFUNDAMENTAÇÃO TÉCNICA:\n{trechos[0]['arquivo']}\n\nGRAU DE CERTEZA TÉCNICA:\nExpressa na Base Local",
+            "tempo": 0.05,
+            "trechos": trechos,
+            "usou_web": False,
+            "modelo": "Banco Local Direto",
+            "erro": ""
+        }
 
     return {
         "ok": False,
         "texto": "",
-        "tempo": round(time.time() - inicio, 2),
-        "trechos": trechos,
-        "erro": f"Cota temporariamente excedida em todos os modelos. Aguarde 1 minuto. Detalhes: {ultimo_erro}"
+        "tempo": 0,
+        "trechos": [],
+        "erro": "Chave de API não configurada e nenhuma norma local encontrada."
     }
 
 # =========================================================
@@ -321,7 +370,7 @@ st.markdown("""
 <div class="romano-wrap">
     <div class="romano-title">ROMANO</div>
     <div class="romano-subtitle">A IA QUE NÃO PASSA PANO</div>
-    <div class="romano-slogan">Inteligência Técnica • Precisão Normativa • Respostas Diretas</div>
+    <div class="romano-slogan">Inteligência Técnica • Autonomia Local • Respostas Diretas</div>
 </div>
 """, unsafe_allow_html=True)
 
@@ -350,22 +399,22 @@ if pergunta:
         st.markdown(pergunta)
 
     with st.chat_message("assistant", avatar=None):
-        with st.spinner("ROMANO processando resposta..."):
+        with st.spinner("ROMANO processando..."):
             resultado = processar_pergunta(pergunta)
 
         if not resultado["ok"]:
-            st.error("Erro na geração da resposta.")
+            st.error("Erro no processamento.")
             st.code(resultado["erro"])
         else:
             st.markdown(resultado["texto"])
 
             debug_info = ""
             if mostrar_debug:
-                origem = "Busca Web Externa" if resultado.get("usou_web") else "Base Documental Local"
+                origem = "Busca Web Externa" if resultado.get("usou_web") else "Base Documental Local / Cache"
                 debug_info = (
                     f"Origem da Fonte: {origem}\n"
                     f"Trechos Analisados: {len(resultado.get('trechos', []))}\n"
-                    f"Modelo Utilizado: {resultado.get('modelo')}\n"
+                    f"Motor de Execução: {resultado.get('modelo')}\n"
                     f"Tempo de Processamento: {resultado.get('tempo', 0)} s"
                 )
                 with st.expander("Diagnóstico Operacional", expanded=False):
